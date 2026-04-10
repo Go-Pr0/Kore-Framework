@@ -31,7 +31,9 @@ CODEX_CONFIG="$CODEX_HOME/config.toml"
 SYSTEMD_DIR="$HOME_DIR/.config/systemd/user"
 FS_SERVICE="$SYSTEMD_DIR/abstract-fs.service"
 SYNC_SERVICE="$SYSTEMD_DIR/claude-oracle-sync.service"
-LAUNCH_AGENT="$HOME_DIR/Library/LaunchAgents/com.claude.oracle.sync.plist"
+LAUNCH_AGENT_DIR="$HOME_DIR/Library/LaunchAgents"
+SYNC_LAUNCH_AGENT="$LAUNCH_AGENT_DIR/com.claude.oracle.sync.plist"
+FS_LAUNCH_AGENT="$LAUNCH_AGENT_DIR/com.claude.oracle.abstract-fs.plist"
 
 # ── Colors ───────────────────────────────────────────────────
 BOLD='\033[1m'; DIM='\033[2m'
@@ -45,13 +47,18 @@ removed() { echo -e "  ${RED}-${NC} $*"; }
 section() { echo ""; echo -e "${BOLD}${BLUE}━━  $*${NC}"; echo ""; }
 hr()      { echo -e "${DIM}────────────────────────────────────────────────────${NC}"; }
 
+# Lowercase a string without bash 4 ${var,,} (macOS ships bash 3.2)
+_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 confirm() {
     local prompt="$1" default="${2:-y}"
-    local hint; [[ "$default" == "y" ]] && hint="Y/n" || hint="y/N"
+    local hint
+    if [ "$default" = "y" ]; then hint="Y/n"; else hint="y/N"; fi
     echo -ne "  ${YELLOW}?${NC} ${prompt} ${DIM}[${hint}]${NC}: "
-    local ans; read -r ans
+    local ans
+    read -r ans || ans=""
     ans="${ans:-$default}"
-    [[ "${ans,,}" == "y" ]]
+    [ "$(_lower "$ans")" = "y" ]
 }
 
 # ── Repo sanity check ────────────────────────────────────────
@@ -150,10 +157,15 @@ _os="$(uname -s)"
 
 echo -e "  ${BOLD}Services:${NC}"
 if [[ "$_os" == "Darwin" ]]; then
-    if [[ -f "$LAUNCH_AGENT" ]]; then
-        echo "    [found]   $LAUNCH_AGENT"
+    if [[ -f "$SYNC_LAUNCH_AGENT" ]]; then
+        echo "    [found]   $SYNC_LAUNCH_AGENT"
     else
         echo "    [absent]  com.claude.oracle.sync (LaunchAgent)"
+    fi
+    if [[ -f "$FS_LAUNCH_AGENT" ]]; then
+        echo "    [found]   $FS_LAUNCH_AGENT"
+    else
+        echo "    [absent]  com.claude.oracle.abstract-fs (LaunchAgent)"
     fi
 else
     if [[ -f "$FS_SERVICE" ]]; then
@@ -248,13 +260,20 @@ SKIPPED_COUNT=0
 section "Stopping services"
 
 if [[ "$_os" == "Darwin" ]]; then
-    if [[ -f "$LAUNCH_AGENT" ]]; then
-        launchctl unload "$LAUNCH_AGENT" 2>/dev/null && ok "Unloaded LaunchAgent" || warn "Could not unload LaunchAgent (may not be loaded)"
-        rm -f "$LAUNCH_AGENT"
-        removed "Removed: $LAUNCH_AGENT"
-        REMOVED_COUNT=$((REMOVED_COUNT + 1))
-    else
-        info "LaunchAgent not installed — skipping"
+    for _plist in "$SYNC_LAUNCH_AGENT" "$FS_LAUNCH_AGENT"; do
+        _label=$(basename "$_plist" .plist)
+        if [[ -f "$_plist" ]]; then
+            launchctl unload "$_plist" 2>/dev/null && ok "Unloaded $_label" || warn "Could not unload $_label (may not be loaded)"
+            rm -f "$_plist"
+            removed "Removed: $_plist"
+            REMOVED_COUNT=$((REMOVED_COUNT + 1))
+        else
+            info "$_label not installed — skipping"
+        fi
+    done
+    # Also kill any stray abstract-fs process bound to the MCP port
+    if command -v pkill &>/dev/null; then
+        pkill -f 'abstract_fs_server.server' 2>/dev/null || true
     fi
 else
     if systemctl --user is-active abstract-fs.service &>/dev/null 2>&1; then

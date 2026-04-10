@@ -162,8 +162,10 @@ def resolve_semantic_device(raw: str | None) -> str:
         return value
     system = platform.system().lower()
     if system == "darwin":
-        return "auto"
-    return "auto"
+        return "mps" if platform.machine().lower() in ("arm64", "aarch64") else "cpu"
+    # Linux: leave as cuda by default — the abstract-fs server falls back to
+    # CPU internally if torch.cuda.is_available() is False.
+    return "cuda"
 
 
 # Keys from .env that should be forwarded to the MCP server process.

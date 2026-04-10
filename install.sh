@@ -4,15 +4,22 @@
 # ============================================================
 # Usage:  bash install.sh          (interactive)
 #         bash install.sh --yes    (accept all defaults)
+#
+# Runs on Linux and macOS (bash 3.2+). If invoked from a
+# directory other than ~/.claude-oracle, the installer copies
+# itself there and re-executes from the canonical location.
 # ============================================================
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CANONICAL_REPO="$HOME/.claude-oracle"
 SCRIPTS="$REPO/scripts"
 SERVER="$REPO/server"
 SOURCE_RUNTIME="$REPO/source/runtime"
 ENV_FILE="$REPO/.env"
 MCP_JSON="$SOURCE_RUNTIME/semantic-mcp.json"
+OS_NAME="$(uname -s)"
+ARCH_NAME="$(uname -m)"
 
 # ── Colors ───────────────────────────────────────────────────
 BOLD='\033[1m'; DIM='\033[2m'
@@ -28,7 +35,16 @@ section() { echo ""; echo -e "${BOLD}${BLUE}━━  $*${NC}"; echo ""; }
 hr()      { echo -e "${DIM}────────────────────────────────────────────────────${NC}"; }
 
 YES_MODE=false
-[[ "${1:-}" == "--yes" ]] && YES_MODE=true
+RELOCATED=false
+for _arg in "$@"; do
+    case "$_arg" in
+        --yes) YES_MODE=true ;;
+        --relocated) RELOCATED=true ;;
+    esac
+done
+
+# Lowercase a string without bash 4 ${var,,} (macOS ships bash 3.2)
+_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 confirm() {
     # confirm "prompt" [default: y|n]
@@ -36,14 +52,16 @@ confirm() {
     local default="${2:-y}"
     if $YES_MODE; then
         echo -e "  ${DIM}?${NC} ${prompt}  ${DIM}→ auto: ${default}${NC}"
-        [[ "$default" == "y" ]]
+        [ "$default" = "y" ]
         return
     fi
-    local hint; [[ "$default" == "y" ]] && hint="Y/n" || hint="y/N"
+    local hint
+    if [ "$default" = "y" ]; then hint="Y/n"; else hint="y/N"; fi
     echo -ne "  ${YELLOW}?${NC} ${prompt} ${DIM}[${hint}]${NC}: "
-    local ans; read -r ans
+    local ans
+    read -r ans || ans=""
     ans="${ans:-$default}"
-    [[ "${ans,,}" == "y" ]]
+    [ "$(_lower "$ans")" = "y" ]
 }
 
 prompt() {
@@ -70,14 +88,31 @@ env_read() {
     grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || echo ""
 }
 
-# Set or update a KEY in .env (creates file if needed)
+# Set or update a KEY in .env (creates file if needed).
+# Portable across GNU/BSD sed by using Python for the rewrite.
 env_write() {
     local key="$1" value="$2"
-    if [[ -f "$ENV_FILE" ]] && grep -qE "^#?[[:space:]]*${key}=" "$ENV_FILE" 2>/dev/null; then
-        sed -i "s|^#[[:space:]]*${key}=.*|${key}=${value}|;s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-    else
-        echo "${key}=${value}" >> "$ENV_FILE"
-    fi
+    python3 - "$ENV_FILE" "$key" "$value" <<'PYEOF'
+import os, re, sys
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = []
+if os.path.exists(path):
+    with open(path, encoding='utf-8') as f:
+        lines = f.read().splitlines()
+pat = re.compile(r'^\s*#?\s*' + re.escape(key) + r'\s*=')
+found = False
+out = []
+for line in lines:
+    if pat.match(line):
+        out.append(f'{key}={value}')
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(f'{key}={value}')
+with open(path, 'w', encoding='utf-8') as f:
+    f.write('\n'.join(out) + '\n')
+PYEOF
 }
 
 # ── Repo sanity check ────────────────────────────────────────
@@ -95,7 +130,82 @@ echo -e "${BOLD}${MAGENTA}  ║         Kore Framework — Installer        ║$
 echo -e "${BOLD}${MAGENTA}  ╚═══════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  Repo: ${DIM}$REPO${NC}"
+echo -e "  Platform: ${DIM}${OS_NAME} ${ARCH_NAME}${NC}"
 echo ""
+
+# ════════════════════════════════════════════════════════════
+# STEP 0 — Self-relocation to ~/.claude-oracle
+# ════════════════════════════════════════════════════════════
+# The rest of the system assumes the canonical path
+# ~/.claude-oracle/. scripts/sync.py writes that string into
+# ~/.claude/CLAUDE.md, ~/.gemini/GEMINI.md and ~/.codex/AGENTS.md
+# as the documented "source of truth" location. Running the
+# installer from anywhere else would leave the generated docs
+# pointing at a directory that doesn't exist.
+if ! $RELOCATED && [[ "$REPO" != "$CANONICAL_REPO" ]]; then
+    section "Step 0: Relocating to ~/.claude-oracle"
+    echo "  The installer needs to live at the canonical location:"
+    echo -e "    ${BOLD}$CANONICAL_REPO${NC}"
+    echo ""
+    echo "  Current location: $REPO"
+    echo ""
+    if [[ -e "$CANONICAL_REPO" ]]; then
+        _existing_items=$(ls -A "$CANONICAL_REPO" 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$_existing_items" != "0" ]]; then
+            warn "$CANONICAL_REPO already exists and is not empty."
+            echo "  Contents:"
+            ls -A "$CANONICAL_REPO" 2>/dev/null | head -20 | sed 's/^/    /'
+            echo ""
+            if ! confirm "Overwrite the existing directory?" "n"; then
+                err "Aborted. Move or remove $CANONICAL_REPO and re-run."
+                exit 1
+            fi
+            info "Removing existing $CANONICAL_REPO ..."
+            rm -rf "$CANONICAL_REPO"
+        fi
+    fi
+
+    if ! confirm "Copy this repo to $CANONICAL_REPO and continue from there?"; then
+        err "Aborted. The installer must run from $CANONICAL_REPO."
+        exit 1
+    fi
+
+    info "Copying repo to $CANONICAL_REPO ..."
+    mkdir -p "$CANONICAL_REPO"
+    # Prefer rsync when available — it's on both Linux and macOS by default.
+    # Exclude build artefacts, caches, and the local workspace so we ship a
+    # clean tree. We deliberately include .git so `git pull` still works.
+    if command -v rsync &>/dev/null; then
+        rsync -a \
+            --exclude='server/.venv/' \
+            --exclude='models/' \
+            --exclude='backups/' \
+            --exclude='.team_workspace/' \
+            --exclude='__pycache__/' \
+            --exclude='*.pyc' \
+            "$REPO"/ "$CANONICAL_REPO"/
+    else
+        # Fallback: tar-pipe, portable on any POSIX system.
+        ( cd "$REPO" && tar \
+            --exclude='server/.venv' \
+            --exclude='models' \
+            --exclude='backups' \
+            --exclude='.team_workspace' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            -cf - . ) | ( cd "$CANONICAL_REPO" && tar -xf - )
+    fi
+    chmod +x "$CANONICAL_REPO/install.sh" "$CANONICAL_REPO/uninstall.sh" 2>/dev/null || true
+    ok "Copied to $CANONICAL_REPO"
+
+    # Remember the original path so we can offer to clean it up at the end.
+    export KORE_ORIGINAL_REPO="$REPO"
+
+    info "Re-executing installer from the new location..."
+    echo ""
+    exec bash "$CANONICAL_REPO/install.sh" --relocated "$@"
+fi
+
 echo "  This installer will walk you through:"
 echo "    1.  Checking prerequisites"
 echo "    2.  Configuring your Hugging Face token and cache"
@@ -241,8 +351,16 @@ PYEOF
 )"
 
 # Hardware probe (no torch required)
-_detected="unknown"
-if command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null 2>&1; then
+_detected="cpu"
+if [[ "$OS_NAME" == "Darwin" ]]; then
+    if [[ "$ARCH_NAME" == "arm64" ]]; then
+        _detected="mps"
+        ok "Apple Silicon detected (${ARCH_NAME}) — Metal Performance Shaders available"
+    else
+        info "Intel Mac detected — CPU will be used (no CUDA/MPS available)"
+        _detected="cpu"
+    fi
+elif command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null 2>&1; then
     _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
     _detected="cuda"
     ok "NVIDIA GPU detected: ${_gpu_name}"
@@ -257,11 +375,20 @@ else
     _detected="cpu"
 fi
 
+# On macOS, override any stale cuda/rocm value from semantic-mcp.json with the
+# detected Apple-side default so the user isn't offered a non-functional option.
+if [[ "$OS_NAME" == "Darwin" ]]; then
+    case "$_cur_device" in
+        cuda|rocm) _cur_device="$_detected" ;;
+    esac
+fi
+
 echo ""
 echo "  Current setting in semantic-mcp.json: ${BOLD}${_cur_device}${NC}"
-echo "  Valid options: cuda | rocm | cpu | auto"
+echo "  Detected hardware default:            ${BOLD}${_detected}${NC}"
+echo "  Valid options: cuda | rocm | mps | cpu | auto"
 echo ""
-prompt NEW_DEVICE "Device to use for semantic indexing" "$_cur_device"
+prompt NEW_DEVICE "Device to use for semantic indexing" "$_detected"
 
 if [[ "$NEW_DEVICE" != "$_cur_device" ]]; then
     "$PYTHON" - "$MCP_JSON" "$NEW_DEVICE" <<'PYEOF'
@@ -357,17 +484,10 @@ else
         info "Both models are present — offline mode is safe to enable"
     fi
     if confirm "Enable offline mode?" "$_default_offline"; then
-        # Uncomment the lines if commented, or add them
-        if grep -qE "^#[[:space:]]*TRANSFORMERS_OFFLINE=" "$ENV_FILE" 2>/dev/null; then
-            sed -i "s|^#[[:space:]]*TRANSFORMERS_OFFLINE=.*|TRANSFORMERS_OFFLINE=1|" "$ENV_FILE"
-        else
-            env_write "TRANSFORMERS_OFFLINE" "1"
-        fi
-        if grep -qE "^#[[:space:]]*HF_HUB_OFFLINE=" "$ENV_FILE" 2>/dev/null; then
-            sed -i "s|^#[[:space:]]*HF_HUB_OFFLINE=.*|HF_HUB_OFFLINE=1|" "$ENV_FILE"
-        else
-            env_write "HF_HUB_OFFLINE" "1"
-        fi
+        # env_write already handles both the "commented-out" and "missing"
+        # cases via its Python rewriter — no sed needed.
+        env_write "TRANSFORMERS_OFFLINE" "1"
+        env_write "HF_HUB_OFFLINE" "1"
         ok "Offline mode enabled in .env"
     else
         info "Skipped — the server will check HuggingFace at startup for updates"
@@ -448,30 +568,35 @@ echo "  The auto-sync daemon watches source/ for changes and re-deploys"
 echo "  within seconds, keeping all targets always up to date."
 echo ""
 
-_os="$(uname -s)"
+_os="$OS_NAME"
 
 if [[ "$_os" == "Darwin" ]]; then
-    # macOS LaunchAgent
-    _plist="$HOME/Library/LaunchAgents/com.claude.oracle.sync.plist"
-    echo "  Platform: macOS — will install a LaunchAgent"
-    echo "  Plist: $_plist"
+    # ── macOS LaunchAgents ──────────────────────────────────
+    # Two agents are installed:
+    #   1. com.claude.oracle.sync        — watches source/ and re-syncs
+    #   2. com.claude.oracle.abstract-fs — runs the semantic MCP HTTP daemon
+    #
+    # The MCP config emitted by sync.py is in daemon mode (points at
+    # http://127.0.0.1:8800/mcp), so without agent #2 nothing listens
+    # and every MCP call from Claude Code would silently fail.
+    _la_dir="$HOME/Library/LaunchAgents"
+    _sync_plist="$_la_dir/com.claude.oracle.sync.plist"
+    _fs_plist="$_la_dir/com.claude.oracle.abstract-fs.plist"
+    _log_dir="$HOME/.claude/debug"
+    mkdir -p "$_log_dir" "$_la_dir"
+
+    _venv_py="$SERVER/.venv/bin/python"
+    [[ ! -f "$_venv_py" ]] && _venv_py="$PYTHON"
+
+    echo "  Platform: macOS — will install two LaunchAgents:"
+    echo "    $_sync_plist"
+    echo "    $_fs_plist"
     echo ""
-    if [[ -f "$_plist" ]]; then
-        ok "LaunchAgent already installed"
-        if confirm "Reload / restart it?"; then
-            launchctl unload "$_plist" 2>/dev/null || true
-            launchctl load -w "$_plist"
-            ok "LaunchAgent reloaded"
-        fi
-    elif confirm "Install auto-sync daemon?"; then
-        _log_dir="$HOME/.claude/debug"
-        mkdir -p "$_log_dir" "$(dirname "$_plist")"
-        _venv_py="$SERVER/.venv/bin/python"
-        [[ ! -f "$_venv_py" ]] && _venv_py="$PYTHON"
-        # Write plist via python for reliable XML encoding
-        "$PYTHON" - "$_plist" "$_venv_py" "$SCRIPTS/watch_sync.py" "$REPO" \
-                               "$_log_dir/claude-oracle-sync.out.log" \
-                               "$_log_dir/claude-oracle-sync.err.log" <<'PYEOF'
+
+    _install_sync_plist() {
+        "$PYTHON" - "$_sync_plist" "$_venv_py" "$SCRIPTS/watch_sync.py" "$REPO" \
+                       "$_log_dir/claude-oracle-sync.out.log" \
+                       "$_log_dir/claude-oracle-sync.err.log" <<'PYEOF'
 import plistlib, sys
 plist_path, python, watch_script, cwd, stdout_log, stderr_log = sys.argv[1:]
 plist = {
@@ -486,10 +611,111 @@ plist = {
 with open(plist_path, 'wb') as f:
     plistlib.dump(plist, f)
 PYEOF
-        launchctl load -w "$_plist"
-        ok "LaunchAgent installed: $_plist"
+    }
+
+    _install_fs_plist() {
+        # Render a LaunchAgent that mirrors abstract-fs.service.template:
+        # same env vars, same ExecStart, same working dir. We read
+        # semantic-mcp.json + .env so the behavior stays in sync with
+        # the Linux systemd path.
+        "$PYTHON" - "$_fs_plist" "$MCP_JSON" "$ENV_FILE" "$_venv_py" "$SERVER" \
+                       "$_log_dir/abstract-fs.out.log" \
+                       "$_log_dir/abstract-fs.err.log" <<'PYEOF'
+import json, os, plistlib, sys
+from pathlib import Path
+
+plist_path, mcp_json, env_file, python, server_dir, out_log, err_log = sys.argv[1:]
+
+def expand(p):
+    return str(Path(p).expanduser())
+
+manifest = json.load(open(mcp_json))['semantic_mcp']
+host = manifest.get('host', '127.0.0.1')
+port = str(manifest.get('port', 8800))
+semantic_device = manifest.get('semantic_device', 'auto')
+if semantic_device == 'auto':
+    # On Darwin, 'auto' means MPS on Apple Silicon, CPU otherwise.
+    import platform
+    semantic_device = 'mps' if platform.machine() == 'arm64' else 'cpu'
+embedding_model = manifest.get('embedding_model', 'jinaai/jina-code-embeddings-1.5b')
+pythonpath = os.path.join(expand(manifest.get('repo_path', server_dir)), manifest.get('pythonpath', 'src'))
+log_file = expand(manifest.get('log_file', '~/.claude/debug/abstract-fs.log'))
+
+env = {
+    'MCP_TRANSPORT': 'streamable-http',
+    'MCP_HOST': host,
+    'MCP_PORT': port,
+    'SEMANTIC_DEVICE': semantic_device,
+    'EMBEDDING_MODEL': embedding_model,
+    'PYTHONPATH': pythonpath,
+    'LOG_FILE': log_file,
+    'PATH': '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/sbin',
+}
+
+# Forward HF_* keys from repo .env so the daemon inherits the same cache and
+# offline toggles the installer configured.
+if os.path.exists(env_file):
+    for raw in open(env_file, encoding='utf-8').read().splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if key in ('HF_HUB_CACHE', 'HF_TOKEN', 'TRANSFORMERS_OFFLINE', 'HF_HUB_OFFLINE'):
+            env[key] = expand(value) if value.startswith('~') else value
+
+plist = {
+    'Label': 'com.claude.oracle.abstract-fs',
+    'ProgramArguments': [python, '-m', manifest.get('module', 'abstract_fs_server.server')],
+    'EnvironmentVariables': env,
+    'WorkingDirectory': expand(manifest.get('repo_path', server_dir)),
+    'RunAtLoad': True,
+    'KeepAlive': True,
+    'StandardOutPath': out_log,
+    'StandardErrorPath': err_log,
+    'ProcessType': 'Interactive',
+}
+with open(plist_path, 'wb') as f:
+    plistlib.dump(plist, f)
+PYEOF
+    }
+
+    # Sync LaunchAgent
+    if [[ -f "$_sync_plist" ]]; then
+        ok "sync LaunchAgent already installed"
+        if confirm "Reload / restart it?"; then
+            launchctl unload "$_sync_plist" 2>/dev/null || true
+            _install_sync_plist
+            launchctl load -w "$_sync_plist"
+            ok "sync LaunchAgent reloaded"
+        fi
+    elif confirm "Install auto-sync LaunchAgent?"; then
+        _install_sync_plist
+        launchctl load -w "$_sync_plist"
+        ok "sync LaunchAgent installed: $_sync_plist"
     else
-        warn "Skipped. Run later: python3 scripts/install.py"
+        warn "Skipped sync LaunchAgent."
+    fi
+
+    echo ""
+
+    # abstract-fs LaunchAgent (the MCP daemon)
+    if [[ -f "$_fs_plist" ]]; then
+        ok "abstract-fs LaunchAgent already installed"
+        if confirm "Reload / restart it?"; then
+            launchctl unload "$_fs_plist" 2>/dev/null || true
+            _install_fs_plist
+            launchctl load -w "$_fs_plist"
+            ok "abstract-fs LaunchAgent reloaded"
+        fi
+    elif confirm "Install abstract-fs LaunchAgent (semantic MCP daemon)?"; then
+        _install_fs_plist
+        launchctl load -w "$_fs_plist"
+        ok "abstract-fs LaunchAgent installed: $_fs_plist"
+        info "Logs: $_log_dir/abstract-fs.{out,err}.log"
+    else
+        warn "Skipped abstract-fs LaunchAgent — semantic MCP will not start."
+        warn "Claude Code will fail to reach http://127.0.0.1:8800/mcp until you install it."
     fi
 
 else
@@ -587,11 +813,38 @@ echo "    Re-sync:      python3 scripts/sync.py"
 echo "    Init models:  python3 scripts/init_models.py"
 echo "    Uninstall:    bash uninstall.sh"
 echo ""
-if [[ "$_os" != "Darwin" ]]; then
+if [[ "$_os" == "Darwin" ]]; then
+    echo "  Service logs:"
+    echo "    tail -f ~/.claude/debug/abstract-fs.out.log"
+    echo "    tail -f ~/.claude/debug/claude-oracle-sync.out.log"
+    echo ""
+    echo "  Manage agents:"
+    echo "    launchctl list | grep claude.oracle"
+    echo "    launchctl unload ~/Library/LaunchAgents/com.claude.oracle.abstract-fs.plist"
+    echo ""
+else
     echo "  Service logs:"
     echo "    journalctl --user -u abstract-fs.service -f"
     echo "    journalctl --user -u claude-oracle-sync.service -f"
     echo ""
 fi
+
+# Offer to remove the original clone after a successful relocated run.
+if [[ -n "${KORE_ORIGINAL_REPO:-}" && -d "$KORE_ORIGINAL_REPO" && "$KORE_ORIGINAL_REPO" != "$CANONICAL_REPO" ]]; then
+    hr
+    echo ""
+    echo "  The installer was copied from:"
+    echo -e "    ${DIM}$KORE_ORIGINAL_REPO${NC}"
+    echo "  It can be safely removed — everything now lives under $CANONICAL_REPO."
+    echo ""
+    if confirm "Remove the original clone at $KORE_ORIGINAL_REPO?" "n"; then
+        rm -rf "$KORE_ORIGINAL_REPO"
+        ok "Removed: $KORE_ORIGINAL_REPO"
+    else
+        info "Left in place. Delete it manually whenever you're ready."
+    fi
+    echo ""
+fi
+
 echo -e "  ${BOLD}Restart Claude Code to load the new MCP server and agent definitions.${NC}"
 echo ""
