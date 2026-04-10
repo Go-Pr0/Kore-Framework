@@ -1,6 +1,6 @@
 ---
 name: alpha-team
-description: Start a native Claude Code research team workflow. Default (/alpha-team) presents the domain plan in chat and waits for user approval before triggering operatives. Use /alpha-team auto to skip the review gate and run straight through.
+description: Start a native Claude Code research team workflow. Decomposes the topic into domains, spawns parallel R/V operatives, runs a synthesis gate, and produces a set of verified domain documents.
 user_invocable: true
 ---
 
@@ -33,19 +33,7 @@ user_invocable: true
     by Delta Team or referenced directly. All content must come from live web search performed during this run.
   </purpose>
 
-  <modes>
-    /alpha-team        → INTERACTIVE (default)
-      Present the domain plan in chat. Wait for user approval.
-      Spawn all operatives idle immediately (they cost nothing until triggered).
-      Trigger R-operatives only after explicit approval.
-
-    /alpha-team auto   → AUTO
-      Spawn all operatives idle, trigger R-operatives immediately.
-      No user gate. Runs straight through to completion.
-  </modes>
-
   <startup>
-    <step>Determine mode: "auto" in invocation → AUTO, otherwise INTERACTIVE.</step>
     <step>Determine workspace_dir: {project_root}/.team_workspace/{YYYYMMDD-HHMM-topic-slug}/. Create it.</step>
     <step>Create the native team via TeamCreate with a descriptive name like "alpha-{topic-slug}".</step>
     <step>Decompose the topic into N distinct, non-overlapping knowledge domains.
@@ -54,12 +42,11 @@ user_invocable: true
       Assign each domain: a domain description, an output filename, an R-operative name (a-research-{N}),
       and a paired V-operative name (a-verify-{N}).</step>
     <step>Write workspace_dir/vision.md. See vision_md_format.</step>
-    <step>INTERACTIVE: present the domain plan in chat (see plan_presentation_format). Wait for approval.
-         AUTO: proceed immediately to spawning.</step>
+    <step>Proceed immediately to spawning.</step>
   </startup>
 
   <spawn_phase>
-    After approval (INTERACTIVE) or at startup (AUTO), spawn ALL operatives idle in one batch:
+    Spawn ALL operatives idle in one batch:
 
     For each domain N:
       - Spawn a-research-{N} as a teammate with model haiku. Prompt:
@@ -153,33 +140,10 @@ user_invocable: true
     reveals further questions, log them in handoff.json unresolved_gaps. The ceiling is firm.
   </synthesis_gate>
 
-  <plan_presentation_format>
-    ## Alpha Research Plan: {topic}
-
-    **{N} domains — each gets one R-operative (research) and one V-operative (verify/overwrite).**
-
-    | Domain | Output File | R | V |
-    |--------|-------------|---|---|
-    | {description} | {filename}.md | R1 | V1 |
-    | {description} | {filename}.md | R2 | V2 |
-
-    **Flow**: All R-operatives trigger in parallel → each R messages its paired V directly (file path only) → V overwrites the file → V messages Alpha Command → Alpha Command spawns V-B version if V made significant corrections → synthesis gate (may spawn phase 2 depth operatives if research revealed unanswered questions).
-
-    **Output**: `{workspace_dir}/` — one verified .md file per domain.
-
-    **Date constraint**: Live web search only. No training data.
-
-    ---
-    *Approve to begin, or describe domain changes.*
-  </plan_presentation_format>
-
   <vision_md_format>
     ---
     ## Objective
     What is being researched, why, and the current date (so "up-to-date" is unambiguous).
-
-    ## Mode
-    INTERACTIVE | AUTO
 
     ## Topic
     {The user's research topic verbatim, plus any scope clarifications.}
@@ -255,7 +219,6 @@ user_invocable: true
     <rule>If an R-operative fails or does not respond, re-trigger it with the same prompt. Do not spawn a replacement — re-use the idle teammate.</rule>
     <rule>If a V-operative fails, spawn a replacement V{N} with the same instructions. The file exists — V just needs to verify it.</rule>
     <rule>If a domain file is empty or malformed after R completes, re-trigger R{N} before allowing V{N} to start.</rule>
-    <rule>If the user requests scope expansion in INTERACTIVE mode, define new domains, spawn fresh R/V pairs idle, and trigger them. Their completions feed into the synthesis gate alongside the original domains.</rule>
     <rule>If a depth R-operative fails, re-trigger it with the same prompt plus the prior context. If it fails again, skip that depth question and log it in handoff.json unresolved_gaps — do not block completion.</rule>
   </error_handling>
 </alpha_team_skill>
