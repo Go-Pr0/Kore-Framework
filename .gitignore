@@ -1,0 +1,7 @@
+backups/
+__pycache__/
+images/
+backups/
+./backups/
+.env
+models/
