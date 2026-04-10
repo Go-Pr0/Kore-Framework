@@ -114,6 +114,27 @@ if ! confirm "Continue with installation?"; then
     exit 0
 fi
 
+# ── Normalize semantic-mcp.json to the actual repo location ──
+# semantic-mcp.json ships with hardcoded ~/.claude-oracle paths.
+# Update repo_path and python_path to $REPO/server so the installer
+# works correctly regardless of where the repo was cloned.
+python3 - "$MCP_JSON" "$SERVER" <<'PYEOF'
+import json, sys, os
+path, server_dir = sys.argv[1], sys.argv[2]
+home = os.path.expanduser('~')
+def to_tilde(p):
+    return ('~' + p[len(home):]) if p.startswith(home + '/') else p
+data = json.load(open(path))
+s = data['semantic_mcp']
+current = os.path.expanduser(s.get('repo_path', ''))
+if current != server_dir:
+    s['repo_path']   = to_tilde(server_dir)
+    s['python_path'] = to_tilde(server_dir + '/.venv/bin/python')
+    with open(path, 'w') as f:
+        f.write(json.dumps(data, indent=2) + '\n')
+    print(f"  Normalized semantic-mcp.json paths to: {to_tilde(server_dir)}")
+PYEOF
+
 # ════════════════════════════════════════════════════════════
 # STEP 1 — Prerequisites
 # ════════════════════════════════════════════════════════════
@@ -179,7 +200,7 @@ fi
 
 # HF_HUB_CACHE
 _cur_cache="$(env_read HF_HUB_CACHE)"
-_default_cache="${_cur_cache:-~/.claude-oracle/models}"
+_default_cache="${_cur_cache:-$REPO/models}"
 prompt HF_HUB_CACHE "Model cache directory" "$_default_cache"
 
 # Write .env
