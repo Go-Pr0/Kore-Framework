@@ -9,7 +9,7 @@ user_invocable: true
     <role>Delta Command</role>
     <context>
       When this skill is invoked, YOU become the team lead.
-      You write vision.md, spawn Vector (and d-recon agents if /research active), then wait.
+      You write vision.md, spawn Vector (and d-recon agents if /delta-team-research active), then wait.
       Vector messages you back. You present the ticket as a plan in chat (default mode)
       or immediately proceed (auto mode). Once approved or in auto, you read the ticket's waves and
       their `depends_on` relationships, materialize an execution schedule into vision.md, spawn all
@@ -18,7 +18,7 @@ user_invocable: true
       You are an ACTIVE coordinator during execution — not a bookend. Each raptor messages YOU
       when its wave finishes. On each message you advance the DAG, fire any newly-ready waves
       (those whose dependencies are now all satisfied), and continue until the graph is drained.
-      When all waves complete, you spawn d-apex (if /review) or finish the run.
+      When all waves complete, you spawn d-apex (if /delta-team-review) or finish the run.
     </context>
   </agent_profile>
 
@@ -53,8 +53,8 @@ user_invocable: true
              → DONE
 
     Add-ons expand either mode:
-    - /research → parallel d-recon agents run before Vector
-    - /review   → Apex runs after all waves drain; dynamically picks quick/full mode
+    - /delta-team-research → parallel d-recon agents run before Vector
+    - /delta-team-review   → Apex runs after all waves drain; dynamically picks quick/full mode
   </default_flow>
 
   <startup>
@@ -62,7 +62,7 @@ user_invocable: true
     <step>Determine workspace_dir: {project_root}/.team_workspace/{YYYYMMDD-HHMM-task-slug}/. Create it.</step>
     <step>Create the native team via TeamCreate with a descriptive name.</step>
     <step>Write workspace_dir/vision.md PASS 1: Objective, Mode, Pipeline, Agents, Review Gates. Do NOT write the Execution Schedule yet — the ticket doesn't exist. Include a placeholder heading `## Execution Schedule\n(Populated after Vector completes.)`.</step>
-    <step>If /research active: spawn d-recon agents now (scope is known from vision.md).</step>
+    <step>If /delta-team-research active: spawn d-recon agents now (scope is known from vision.md).</step>
     <step>Spawn d-vector. Its prompt must say to message YOU (delta-command) when done.</step>
     <step>Wait for Vector's message.</step>
   </startup>
@@ -98,9 +98,25 @@ user_invocable: true
         - Spawn d-raptor-{N} as a native teammate with that model.
         - Prompt: "You are d-raptor-{N}. Workspace: {workspace_dir}. Read vision.md, specifically
           the Execution Schedule section to find your wave's dependencies and what you report to
-          on completion. Wave {N}. Wait for a trigger message from delta-command. Begin when triggered."
-      After all raptors are spawned, trigger every ROOT wave (waves with empty `depends_on`) in
-      parallel via a single batch of SendMessage calls:
+          on completion. Wave {N}. Wait for a trigger message from delta-command. Begin when triggered.
+          Two services are available mid-implementation: d-researcher (external API/library facts)
+          and d-advisor (design and architecture decisions). Message either directly with your
+          question and 'Reply to: d-raptor-{N}'."
+
+      After all raptors are spawned, spawn the two on-demand services:
+
+      Spawn d-researcher as a teammate with model sonnet:
+        Prompt: "You are d-researcher. Workspace: {workspace_dir}. Answer raptors' external
+          research questions via SendMessage. Reply directly to the asking raptor.
+          Log to {workspace_dir}/researcher_log.md."
+
+      Spawn d-advisor as a teammate with model opus:
+        Prompt: "You are d-advisor. Workspace: {workspace_dir}. Answer raptors' design and
+          architecture questions via SendMessage. Reply directly to the asking raptor.
+          Log to {workspace_dir}/advisor_log.md."
+
+      Then trigger every ROOT wave (waves with empty `depends_on`) in parallel via a single
+      batch of SendMessage calls:
         "Wave {N} is ready. Ticket: {workspace_dir}/ticket.json. Begin now."
 
       If ticket has more/fewer waves than vision.md estimated: spawn accordingly, update Execution Schedule.
@@ -122,7 +138,7 @@ user_invocable: true
       4. If multiple waves become ready at once, trigger them all in parallel in the same
          message batch. Do not serialize unless forced by the DAG.
       5. If all waves are now done:
-           - If /review is active: spawn d-apex and wait for its verdict.
+           - If /delta-team-review is active: spawn d-apex and wait for its verdict.
            - Otherwise: proceed to completion.
 
     Tracking: you do not need a separate file to track wave state — the presence of
@@ -131,6 +147,10 @@ user_invocable: true
 
     Do NOT let raptors message each other directly. All completion routing goes through you.
     This prevents races on fan-in (waves with multiple dependencies) and keeps retries simple.
+
+    d-researcher and d-advisor operate outside the DAG — they answer raptors directly and do
+    not message you on each exchange. Track only raptor wave completions. Their logs
+    (researcher_log.md, advisor_log.md) are in the workspace for Apex review.
   </execution_coordination>
 
   <plan_presentation_format>
@@ -203,7 +223,7 @@ user_invocable: true
                                         → [delta-command: sync] → raptor-3 → [delta-command] → [DONE]
                              raptor-2 ↗
 
-    Auto with /research and /review:
+    Auto with /delta-team-research and /delta-team-review:
       recon-a ↘
                Vector → [delta-command: schedule] → raptor-1 ↘
       recon-b ↗                                            → [delta-command] → apex → [DONE]
@@ -214,7 +234,7 @@ user_invocable: true
     All raptors message delta-command on completion. No raptor-to-raptor messaging.
 
     ## Review Gates
-    - After all waves: YES/NO (controlled by presence of /review skill)
+    - After all waves: YES/NO (controlled by presence of /delta-team-review skill)
 
     ## Execution Schedule
     [Written by delta-command in PASS 2 after reading ticket.json. Skip in PASS 1.]
@@ -236,9 +256,10 @@ user_invocable: true
     <rule>Always set model explicitly on every spawn — never rely on inherited defaults.</rule>
     <rule>Vector's prompt must say to message delta-command when done — never a raptor directly.</rule>
     <rule>Raptors wait for a trigger message from delta-command before starting. They do not begin on spawn, and they never receive triggers from other raptors.</rule>
-    <rule>Recon agents (if /research) are spawned before Vector. Their scope is in vision.md.</rule>
+    <rule>Recon agents (if /delta-team-research) are spawned before Vector. Their scope is in vision.md.</rule>
     <rule>All raptor completion messages route to delta-command. Raptors do NOT message each other.</rule>
     <rule>Root waves (empty depends_on) are triggered in parallel in a single SendMessage batch, not sequentially.</rule>
+    <rule>d-researcher and d-advisor are spawned after all raptors, before triggering root waves. Both are services, not peer raptors — raptors may message either directly. This is an explicit exception to the no-direct-messaging rule.</rule>
   </spawn_rules>
 
   <review_gate_behavior>
@@ -247,8 +268,8 @@ user_invocable: true
        full mode based on the diff scope (it writes its chosen mode into review.md).
     2. Wait for Apex's message.
     3. Read review.md. Present findings to the user.
-    4. If FAIL: follow /review skill's fix-pass behavior (targeted fix raptor scoped to flagged files).
-    5. If PASS or PASS_WITH_NOTES: wait for explicit user acknowledgment before closing.
+    4. If FAIL: follow /delta-team-review skill's fix-pass behavior (targeted fix raptor scoped to flagged files).
+    5. If PASS: wait for explicit user acknowledgment before closing.
   </review_gate_behavior>
 
   <completion>

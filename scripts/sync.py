@@ -137,7 +137,40 @@ def expand_path(raw: str) -> Path:
 
 
 def load_runtime_manifest() -> dict:
-    return load_json(RUNTIME / "semantic-mcp.json")
+    """Load semantic-mcp.json and override location-dependent fields with
+    the actual install path (REPO), regardless of what the file says.
+
+    This guarantees that:
+    - running sync.py from a clone at an unusual path still produces a
+      systemd unit / ~/.claude.json that points at THIS checkout
+    - the auto-sync daemon (which re-runs sync.py on every source change)
+      is self-healing if the JSON ever drifts
+    - install.sh and sync.py can never disagree about what repo_path is
+    """
+    data = load_json(RUNTIME / "semantic-mcp.json")
+    s = data.get("semantic_mcp")
+    if not s:
+        return data
+
+    def _tilde(p: Path) -> str:
+        try:
+            return "~/" + str(p.relative_to(HOME))
+        except ValueError:
+            return str(p)
+
+    server_dir = REPO / "server"
+    s["repo_path"] = _tilde(server_dir)
+    s["python_path"] = _tilde(server_dir / ".venv" / "bin" / "python")
+
+    # Preload whatever directories the manifest requested, but also always
+    # include the current REPO — otherwise users who cloned to a custom path
+    # would never have their repo preloaded.
+    preload = list(s.get("preload_repo_paths") or [])
+    current = _tilde(REPO)
+    if current not in preload and str(REPO) not in preload:
+        preload.insert(0, current)
+    s["preload_repo_paths"] = preload
+    return data
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -345,6 +378,8 @@ def install_systemd_unit(emission: McpEmission, backup_root: Path) -> None:
     port = str(server.get("port", 8800))
     embedding_model = server.get("embedding_model", "jinaai/jina-code-embeddings-1.5b")
     semantic_device = resolve_semantic_device(server.get("semantic_device"))
+    preload_list = server.get("preload_repo_paths") or []
+    preload_repo_paths = ",".join(str(expand_path(p)) for p in preload_list)
 
     # HF_HUB_CACHE: prefer repo .env, fall back to systemd %h specifier
     raw_hf_cache = dot_env.get("HF_HUB_CACHE", "")
@@ -371,6 +406,7 @@ def install_systemd_unit(emission: McpEmission, backup_root: Path) -> None:
         HF_HUB_CACHE=hf_hub_cache,
         PYTHONPATH=pythonpath,
         LOG_FILE=log_file,
+        PRELOAD_REPO_PATHS=preload_repo_paths,
         PYTHON_PATH=python_path,
         HF_EXTRAS=hf_extras,
     )

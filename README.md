@@ -61,8 +61,8 @@ claude-oracle/
 │   ├── claude/
 │   │   ├── CLAUDE.md           # Global system prompt (injected into every session)
 │   │   ├── agents/             # Sub-agent & teammate definitions
-│   │   ├── rules/              # Behavioral rules (global.md, etc.)
-│   │   ├── skills/             # Callable /slash-command skills
+│   │   ├── rules/              # Behavioral rules (agents.md, code.md, teams.md, …)
+│   │   ├── skills/             # Callable /slash-command skills (delta-team, bravo-team, alpha-team, …)
 │   │   └── removed/            # Tombstones — entries here are deleted from targets on sync
 │   └── runtime/
 │       ├── semantic-mcp.json   # MCP server config (model, port, device)
@@ -189,11 +189,11 @@ raw       →  literal strings: log messages, config keys, TODO comments
 
 ## Agent Systems
 
-Two systems exist. Which one to use depends entirely on whether `/team-lead` was invoked.
+Two systems exist side by side: lightweight **sub-agents** you drive yourself, and full **native teams** invoked via slash commands. Which one runs depends entirely on whether a `/…-team` skill was invoked.
 
 ### Sub-agents (default)
 
-When you haven't invoked `/team-lead`, you are the orchestrator. Spawn sub-agents via `Agent(subagent_type=...)` based on what the task needs.
+When no team skill is active, you are the orchestrator. Spawn sub-agents via `Agent(subagent_type=...)` based on what the task needs.
 
 ```mermaid
 flowchart LR
@@ -204,8 +204,6 @@ flowchart LR
 
     You --> Pick --> Run --> Out --> You
 ```
-
-**Available sub-agents and when to use them:**
 
 | Sub-agent | Use when |
 |-----------|----------|
@@ -224,29 +222,171 @@ Simple change:  worker-agent directly
 Unknown API:    researcher-agent → ticket-agent → worker-agent
 ```
 
-### Team pipeline (`/team-lead`)
+---
 
-Invoked with `/team-lead`. You become the team lead. Teammates self-route through a shared workspace — you only re-enter at gates.
+### Native Teams
+
+Three team skills are available. Each one turns Claude into a **team lead** that spawns dedicated teammates via `TeamCreate` and routes them through a shared workspace at `.team_workspace/{YYYYMMDD-HHMM-slug}/`.
+
+| Skill | Purpose | Lead |
+|-------|---------|------|
+| `/delta-team` | Build / implement — plan, execute in waves, optional review | Delta Command |
+| `/bravo-team` | Investigate — triage then trace a bug across layers | Bravo Command |
+| `/alpha-team` | Research — parallel domain research with live verification | Alpha Command |
+
+All three support an `auto` suffix (e.g. `/delta-team auto`) to skip the interactive approval gate.
+
+---
+
+#### Delta Team — `/delta-team`
+
+Implementation pipeline. **Delta Command** (you) writes `vision.md`, spawns **Vector** *(planner)* to produce a `ticket.json` with DAG-ordered waves, then spawns one **Raptor** *(executor)* per wave and fires roots in parallel. Two on-demand services stay idle alongside the raptors: **Advisor** *(architecture)* and **Researcher** *(external facts)* — raptors message them directly mid-wave. When every wave drains, **Apex** *(reviewer)* optionally runs a pass/fail review.
+
+Two add-on skills expand the pipeline:
+- `/delta-team-research` — inserts parallel **Recon** *(research)* agents before Vector.
+- `/delta-team-review` — inserts **Apex** *(reviewer)* after all waves complete, with a targeted fix-pass loop on FAIL.
 
 ```mermaid
 flowchart LR
-    Lead([Team Lead])
-    R[researcher]
-    T[ticket-agent]
-    Gate{approve?}
-    E[executors]
-    Rev[reviewer]
+    User([User])
+    DC([Delta Command])
+    Recon1["d-recon 1<br/><i>research</i>"]
+    Recon2["d-recon 2<br/><i>research</i>"]
+    Vector["d-vector<br/><i>planner</i>"]
+    Gate{approve<br/>ticket?}
+    R1["d-raptor 1<br/><i>executor</i>"]
+    R2["d-raptor 2<br/><i>executor</i>"]
+    R3["d-raptor 3<br/><i>executor</i>"]
+    Apex["d-apex<br/><i>reviewer</i>"]
+    Advisor["d-advisor<br/><i>architecture</i>"]
+    Researcher["d-researcher<br/><i>external facts</i>"]
+    Done([Done])
 
-    Lead --> R --> T --> Gate
-    Gate -->|yes| E --> Rev --> Lead
-    Gate -.->|no| Lead
+    User --> DC
+    DC -.->|optional| Recon1 --> Vector
+    DC -.->|optional| Recon2 --> Vector
+    DC --> Vector --> Gate
+    Gate -->|yes| R1
+    Gate -->|yes| R2
+    R1 --> R3
+    R2 --> R3
+    R3 --> Apex
+    Apex --> Done
+    Gate -.->|revise| Vector
+
+    classDef service fill:#fef3c7,stroke:#d97706,color:#78350f;
+    class Advisor,Researcher service;
 ```
 
-All artifacts are written to `.team_workspace/{YYYYMMDD-HHMM-slug}/` inside the project root. No agent writes files outside that workspace except for production code changes.
+Advisor and Researcher sit **outside the DAG** — they never block a wave and never message Delta Command. Raptors ask them directly via `SendMessage` and get a direct reply.
 
-**Modes:**
-- `/team-lead` — Interactive: presents `ticket.json` to you for approval before executors run
-- `/team-lead auto` — Fully automated: runs start to finish without interruption
+| Agent | Role | Model | Notes |
+|-------|------|-------|-------|
+| `d-vector` *(planner)* | Writes `ticket.json` | sonnet | Revises on feedback during plan gate |
+| `d-raptor-N` *(executor)* | Implements one wave | per `model_hint` | Messages Delta Command on completion |
+| `d-apex` *(reviewer)* | Pass/fail review | sonnet | Dynamically picks quick vs full mode |
+| `d-recon` *(researcher)* | Pre-ticket research | sonnet | Add-on via `/delta-team-research` |
+| `d-advisor` *(architecture service)* | Design Q&A mid-wave | opus | On-demand, read-only |
+| `d-researcher` *(external-facts service)* | Web Q&A mid-wave | sonnet | On-demand, web-only |
+
+---
+
+#### Bravo Team — `/bravo-team`
+
+Bug-investigation pipeline. **Bravo Command** (you) always runs a cheap **triage** pass first — locate the manifestation point, read ~3 neighboring files, commit to a verdict:
+
+- **SIMPLE** — single-layer bug → spawn `bug-identifier-agent` as a **sub-agent** (no team).
+- **COMPLEX** — multi-layer bug → create a team with parallel **Scouts** *(tracers)* and one **Verifier** *(cross-checker)*.
+
+Scouts never talk to each other; each one traces exactly one layer or direction (BACKWARD, FORWARD, or BOUNDARY) and writes a `trace.md`. The Verifier reads every trace, checks convergence and negative space, and writes `verification/report.md`. Bravo Command then runs a plain `cat` merge into `report.md` — no synthesis pass. Bravo **finds** bugs; it never fixes them.
+
+```mermaid
+flowchart LR
+    User([User])
+    BC([Bravo Command])
+    Triage["triage<br/><i>locate + judge</i>"]
+    Verdict{verdict?}
+    BugId["bug-identifier-agent<br/><i>sub-agent</i>"]
+    Scout1["b-scout 1<br/><i>BACKWARD</i>"]
+    Scout2["b-scout 2<br/><i>FORWARD</i>"]
+    Scout3["b-scout 3<br/><i>BOUNDARY</i>"]
+    Verifier["b-verifier<br/><i>convergence</i>"]
+    Merge["cat merge<br/><i>report.md</i>"]
+    Done([Done])
+
+    User --> BC --> Triage --> Verdict
+    Verdict -->|SIMPLE| BugId --> Merge
+    Verdict -->|COMPLEX| Scout1 --> Verifier
+    Verdict -->|COMPLEX| Scout2 --> Verifier
+    Verdict -->|COMPLEX| Scout3 --> Verifier
+    Verifier --> Merge --> Done
+```
+
+| Agent | Role | Model | Notes |
+|-------|------|-------|-------|
+| `b-scout-{name}` *(tracer)* | Traces one layer/direction | haiku (sonnet for reflection-heavy code) | 2–4 per COMPLEX run |
+| `b-verifier` *(cross-checker)* | Convergence + negative-space check | sonnet | Can trigger one targeted re-scout on divergence |
+| `bug-identifier-agent` *(sub-agent)* | Single-layer root-cause | sonnet | Only on SIMPLE verdict — not a team member |
+
+---
+
+#### Alpha Team — `/alpha-team`
+
+Live-research pipeline. **Alpha Command** (you) decomposes the topic into 2–5 non-overlapping domains. For each domain, it pre-spawns a paired **R-operative** *(research)* and **V-operative** *(verifier)* idle, then triggers every R in parallel. Each R writes a domain file, messages its paired V directly, and V overwrites the file with corrections. If V's changes were significant ("replaced"), Alpha Command spawns a **B-version** V for one final polishing pass — no C-version, two-pass ceiling.
+
+After phase 1, a **synthesis gate** reads every domain file for coverage gaps and for depth questions revealed by the research itself. If any exist, phase 2 spawns fresh Rd/Vd pairs to chase them. The final deliverable is the set of verified `.md` files — Alpha never produces a single synthesized document.
+
+```mermaid
+flowchart LR
+    User([User])
+    AC([Alpha Command])
+    R1["a-research 1<br/><i>R-operative</i>"]
+    V1["a-verify 1<br/><i>V-operative</i>"]
+    R2["a-research 2<br/><i>R-operative</i>"]
+    V2["a-verify 2<br/><i>V-operative</i>"]
+    VB["a-verify N-B<br/><i>polish pass</i>"]
+    Synth{synthesis<br/>gate}
+    Rd["Rd / Vd<br/><i>depth pairs</i>"]
+    Done([Done])
+
+    User --> AC
+    AC --> R1 --> V1 --> Synth
+    AC --> R2 --> V2 --> Synth
+    V1 -.->|replaced| VB --> Synth
+    Synth -->|depth questions| Rd --> Done
+    Synth -->|clean| Done
+```
+
+| Agent | Role | Model | Notes |
+|-------|------|-------|-------|
+| `a-research-{N}` *(R-operative)* | Writes one domain file from live web search | haiku | Messages paired V directly |
+| `a-verify-{N}` *(V-operative)* | Independently verifies and overwrites the file | haiku | Reports `polished` or `replaced` |
+| `a-verify-{N}b` *(B-version V-operative)* | On-demand final polish | haiku | Only spawned if V reported `replaced` |
+| `a-research-d{N}` / `a-verify-d{N}` *(depth pair)* | Phase 2 follow-up | haiku | Only spawned if synthesis gate finds depth questions |
+
+---
+
+### Team Workspace
+
+Every native team run creates:
+
+```
+.team_workspace/{YYYYMMDD-HHMM-slug}/
+├── vision.md              # pipeline contract — written by the lead
+├── ticket.json            # delta: written by Vector
+├── research_{topic}.md    # delta-research: written by each Recon
+├── wave_{N}/handoff.json  # delta: written by each Raptor
+├── review.md              # delta-review: written by Apex
+├── scouts/scout_{name}/   # bravo: one trace.md per Scout
+├── verification/report.md # bravo: written by Verifier
+├── {domain}.md            # alpha: one per domain, overwritten by V
+├── depth_{slug}.md        # alpha phase 2
+├── advisor_log.md         # delta: d-advisor Q&A transcript
+├── researcher_log.md      # delta: d-researcher Q&A transcript
+└── handoff.json           # final handoff — written by the lead
+```
+
+No agent writes files outside the workspace except when editing actual production code.
 
 ---
 
@@ -268,5 +408,5 @@ If there's any ambiguity at all, use `sonnet`.
 
 - **Claude is the oracle.** Edit source files here; never edit generated targets.
 - **Gemini and Codex are outputs.** Their configs are generated from Claude source — they don't define anything.
-- **Native team workflows are Claude-only.** The `/team-lead` pipeline and team workspace convention are not replicated to other tools.
+- **Native team workflows are Claude-only.** The `/delta-team`, `/bravo-team`, and `/alpha-team` pipelines and the team workspace convention are not replicated to other tools.
 - **Backups before every sync.** `backups/<timestamp>/` preserves the previous state of all targets before each deployment.

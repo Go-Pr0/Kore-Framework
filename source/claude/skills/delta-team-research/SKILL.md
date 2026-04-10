@@ -1,5 +1,5 @@
 ---
-name: research
+name: delta-team-research
 description: Add-on for /delta-team. Inserts a parallel d-recon phase before Vector. You decide how many d-recon agents based on distinct knowledge domains in the task.
 user_invocable: true
 ---
@@ -40,15 +40,15 @@ user_invocable: true
   </researcher_spawn_prompt>
 
   <pipeline_shape>
-    With /research, the vision.md Pipeline section looks like:
+    With /delta-team-research, the vision.md Pipeline section looks like:
 
       Recon A (research_{a}.md) ↘
-      Recon B (research_{b}.md)  → Vector → [team-lead: schedule] → raptor-1 ↘
-      [Recon N]                  ↗                                              → [team-lead] → [Done]
-                                                                    raptor-2 ↗
+      Recon B (research_{b}.md)  → Vector → [delta-command: schedule] → raptor-1 ↘
+      [Recon N]                  ↗                                                 → [delta-command] → [Done]
+                                                                        raptor-2 ↗
 
     Researchers run in parallel. Ticket agent waits for all of them. After ticket approval,
-    team-lead writes the Execution Schedule and executors run in parallel where their depends_on
-    allows it. All executors report to team-lead.
+    delta-command writes the Execution Schedule and executors run in parallel where their depends_on
+    allows it. All executors report to delta-command.
   </pipeline_shape>
 </research_addon>

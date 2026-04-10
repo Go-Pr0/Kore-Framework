@@ -68,9 +68,19 @@ for pkg in packages:
     except ImportError as e:
         print(f'  MISSING  {pkg}: {e}')
         ok = False
-import torch
-print(f'  GPU available: {torch.cuda.is_available()}')
-print(f'  HIP version: {getattr(torch.version, \"hip\", None)}')
+import torch, platform
+cuda = torch.cuda.is_available()
+hip  = getattr(torch.version, 'hip', None)
+mps  = getattr(torch.backends, 'mps', None)
+mps_ok = bool(mps and mps.is_available() and mps.is_built())
+if cuda and hip:
+    print(f'  Accelerator: ROCm (HIP {hip})')
+elif cuda:
+    print(f'  Accelerator: CUDA ({torch.cuda.get_device_name(0)})')
+elif mps_ok:
+    print(f'  Accelerator: MPS (Apple {platform.machine()})')
+else:
+    print('  Accelerator: CPU only')
 import sys; sys.exit(0 if ok else 1)
 "
 

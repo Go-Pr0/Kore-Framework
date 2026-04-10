@@ -1,5 +1,5 @@
 ---
-name: review
+name: delta-team-review
 description: Add-on for /delta-team. Inserts a review phase after all d-raptors complete. Apex checks correctness, consistency, and scope adherence — and can trigger targeted fix passes.
 user_invocable: true
 ---
@@ -30,47 +30,36 @@ user_invocable: true
   </reviewer_scope>
 
   <reviewer_output>
-    The reviewer writes workspace/review.md:
+    The reviewer (d-apex) writes workspace/review.md. See d-apex.md for the full format.
+    Key fields:
 
-    ## Verdict: PASS | PASS_WITH_NOTES | FAIL
-
+    ## Verdict: PASS | FAIL
     ## Mode: QUICK | FULL — with a one-line reason
+    ## Summary — one paragraph on overall quality
+    ## Issues — numbered list with Severity: BLOCKER | WARNING | NITPICK, file, problem, fix
+    ## Required Changes — only present when verdict is FAIL
 
-    ## Summary
-    One paragraph on overall quality.
-
-    ## Issues
-    For each issue (if any):
-    - Severity: critical | minor
-    - File and location
-    - What is wrong and why
-    - What the fix should be
-
-    ## Approved Files
-    List of files that are correct and need no changes.
-
-    Then messages team-lead.
+    Then messages delta-command.
   </reviewer_output>
 
   <fix_pass_behavior>
-    After receiving the reviewer's message, team-lead decides:
+    After receiving the reviewer's message, delta-command decides:
     - PASS: report to user, done.
-    - PASS_WITH_NOTES: report to user with notes inline, done.
-    - FAIL: spawn a targeted fix executor scoped only to the flagged files.
-      The fix executor spawn prompt must include: vision.md path, ticket.json path, workspace/review.md path,
+    - FAIL: spawn a targeted fix raptor scoped only to the flagged files.
+      The fix raptor spawn prompt must include: vision.md path, ticket.json path, workspace/review.md path,
       and the list of flagged files. It does NOT re-run the full plan — it addresses review issues only.
-      After fix executor completes, team-lead spawns the reviewer again for a second pass.
+      After fix raptor completes, delta-command spawns d-apex again for a second pass.
     - If the reviewer fails twice on the same issue, surface it to the user rather than looping.
   </fix_pass_behavior>
 
   <pipeline_shape>
-    With /review, the vision.md Pipeline section looks like (with parallel waves shown as fan-out):
+    With /delta-team-review, the vision.md Pipeline section looks like (with parallel waves shown as fan-out):
 
-      Vector → [team-lead: schedule] → d-raptor-1 ↘
-                                                  → [team-lead] → Apex → [Fix Raptor if FAIL] → [team-lead] → [Done]
+      Vector → [delta-command: schedule] → d-raptor-1 ↘
+                                                  → [delta-command] → Apex → [Fix Raptor if FAIL] → [delta-command] → [Done]
                                        d-raptor-2 ↗
 
-    All executors report to team-lead. Team-lead spawns the reviewer once every wave is complete.
-    Reviewer's next_agent is "team-lead".
+    All executors report to delta-command. Team-lead spawns the reviewer once every wave is complete.
+    Reviewer's next_agent is "delta-command".
   </pipeline_shape>
 </review_addon>

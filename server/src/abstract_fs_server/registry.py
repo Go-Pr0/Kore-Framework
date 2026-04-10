@@ -32,6 +32,59 @@ from abstract_fs_server.semantic_index import SemanticIndex
 log = logging.getLogger(__name__)
 
 
+def _resolve_and_validate(repo_path: str) -> str:
+    """Expand ``repo_path``, stat it, and return the canonical absolute form.
+
+    Uses ``os.stat`` rather than ``Path.exists()`` so we surface the real
+    ``OSError`` (EACCES, ELOOP, ENOTDIR, etc.) instead of a blanket
+    "does not exist" — which on macOS was masking a launchd-level HOME
+    / symlink-resolution mismatch.
+    """
+    expanded = Path(repo_path).expanduser()
+    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+    try:
+        st = os.stat(absolute)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"repo_path does not exist: {str(absolute)!r} "
+            f"(daemon HOME={os.environ.get('HOME', '?')!r}, cwd={os.getcwd()!r}, "
+            f"errno={exc.errno})"
+        ) from exc
+    except PermissionError as exc:
+        raise ValueError(
+            f"repo_path is not readable by the daemon: {str(absolute)!r} "
+            f"(daemon uid={os.getuid()}, errno={exc.errno}). On macOS this "
+            f"usually means the LaunchAgent needs Full Disk Access for "
+            f"the containing directory."
+        ) from exc
+    except OSError as exc:
+        raise ValueError(
+            f"repo_path could not be stat()'d: {str(absolute)!r} "
+            f"(errno={exc.errno}, {exc.strerror})"
+        ) from exc
+
+    import stat as _stat
+    if not _stat.S_ISDIR(st.st_mode):
+        raise ValueError(
+            f"repo_path is not a directory: {str(absolute)!r}"
+        )
+
+    # Only follow symlinks AFTER we know the raw path is stat-able, so a
+    # broken symlink chain produces a clear error instead of a False return.
+    try:
+        resolved = str(absolute.resolve())
+    except OSError as exc:
+        log.warning(
+            "resolve() failed for %s (%s); falling back to absolute path",
+            absolute,
+            exc,
+        )
+        resolved = str(absolute)
+
+    return resolved
+
+
 @dataclass
 class RepoBundle:
     """All per-repo server state, held together for the daemon's lifetime."""
@@ -88,7 +141,7 @@ class RepoRegistry:
         Raises:
             ValueError: If the path does not exist or is not a directory.
         """
-        resolved = str(Path(repo_path).expanduser().resolve())
+        resolved = _resolve_and_validate(repo_path)
 
         # Fast-path: already built — no lock needed.
         bundle = self._bundles.get(resolved)
@@ -148,7 +201,13 @@ class RepoRegistry:
         Paths already in the registry are skipped.
         """
         for path in repo_paths:
-            resolved = str(Path(path).expanduser().resolve())
+            try:
+                resolved = _resolve_and_validate(path)
+            except ValueError as exc:
+                log.warning(
+                    "RepoRegistry.preload_sync: skipping %s: %s", path, exc
+                )
+                continue
             if resolved in self._bundles:
                 continue
             try:
@@ -165,13 +224,7 @@ class RepoRegistry:
     # ------------------------------------------------------------------
 
     async def _build(self, resolved: str) -> RepoBundle:
-        """Build a RepoBundle for ``resolved`` (already an absolute path)."""
-        path = Path(resolved)
-        if not path.exists():
-            raise ValueError(f"repo_path does not exist: {resolved!r}")
-        if not path.is_dir():
-            raise ValueError(f"repo_path is not a directory: {resolved!r}")
-
+        """Build a RepoBundle for ``resolved`` (already validated absolute path)."""
         log.info("RepoRegistry: building bundle for %s", resolved)
 
         # Build a per-repo ServerConfig by cloning base_config and overriding
@@ -278,12 +331,6 @@ class RepoRegistry:
         restored from disk, spawns a daemon thread to run ``build_from_index``
         so embedding happens concurrently with server startup.
         """
-        path = Path(resolved)
-        if not path.exists():
-            raise ValueError(f"repo_path does not exist: {resolved!r}")
-        if not path.is_dir():
-            raise ValueError(f"repo_path is not a directory: {resolved!r}")
-
         log.info("RepoRegistry: building bundle (sync) for %s", resolved)
 
         per_repo_cache = repo_cache_dir(resolved, self._base_config.cache_root)
@@ -350,7 +397,7 @@ class RepoRegistry:
                     target=semantic.build_from_index,
                     args=(index,),
                     daemon=True,
-                    name=f"semantic-build-{path.name}",
+                    name=f"semantic-build-{Path(resolved).name}",
                 )
                 t.start()
                 log.info(

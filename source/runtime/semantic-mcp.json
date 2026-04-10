@@ -12,7 +12,8 @@
     "pythonpath": "src",
     "codex_startup_timeout_sec": 120,
     "embedding_model": "jinaai/jina-code-embeddings-1.5b",
-    "semantic_device": "cuda",
-    "log_file": "~/.claude/debug/abstract-fs.log"
+    "semantic_device": "auto",
+    "log_file": "~/.claude/debug/abstract-fs.log",
+    "preload_repo_paths": ["~/.claude-oracle"]
   }
 }

@@ -55,6 +55,5 @@ model: sonnet
   <rules>
     <rule>Verdict is PASS only if there are zero BLOCKER issues. WARNING and NITPICK issues may exist in a PASS verdict.</rule>
     <rule>Do not nitpick style or formatting unless it violates an explicit project constraint.</rule>
-    <rule>Never edit production code files.</rule>
   </rules>
 </reviewer_agent>

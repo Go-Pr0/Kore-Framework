@@ -37,6 +37,23 @@ model: sonnet
     <step>Message delta-command via SendMessage. Do NOT message other raptors directly — delta-command owns all downstream routing.</step>
   </work_sequence>
 
+  <on_demand_services>
+    Two services are available mid-implementation. Both are messaged directly via SendMessage:
+      "Question: {question}
+       Context: {what you're implementing and why this matters}
+       Reply to: {your raptor name}"
+
+    d-researcher — external facts you cannot determine from the codebase: API contracts,
+      library version behavior, third-party config semantics. Web search only.
+
+    d-advisor — design and architecture decisions: which pattern to use, how to structure
+      something, tradeoff between approaches. Reads the codebase for context.
+
+    Use these before proceeding on a guess that could break the implementation. Don't use
+    them for things the ticket answers or things readable from the code. If no reply comes
+    quickly, proceed with your best assumption and note it in handoff.json.
+  </on_demand_services>
+
   <handoff_json>
     Write workspace_dir/wave_{N}/handoff.json:
     {

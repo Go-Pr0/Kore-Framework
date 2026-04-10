@@ -224,26 +224,9 @@ if ! confirm "Continue with installation?"; then
     exit 0
 fi
 
-# ── Normalize semantic-mcp.json to the actual repo location ──
-# semantic-mcp.json ships with hardcoded ~/.claude-oracle paths.
-# Update repo_path and python_path to $REPO/server so the installer
-# works correctly regardless of where the repo was cloned.
-python3 - "$MCP_JSON" "$SERVER" <<'PYEOF'
-import json, sys, os
-path, server_dir = sys.argv[1], sys.argv[2]
-home = os.path.expanduser('~')
-def to_tilde(p):
-    return ('~' + p[len(home):]) if p.startswith(home + '/') else p
-data = json.load(open(path))
-s = data['semantic_mcp']
-current = os.path.expanduser(s.get('repo_path', ''))
-if current != server_dir:
-    s['repo_path']   = to_tilde(server_dir)
-    s['python_path'] = to_tilde(server_dir + '/.venv/bin/python')
-    with open(path, 'w') as f:
-        f.write(json.dumps(data, indent=2) + '\n')
-    print(f"  Normalized semantic-mcp.json paths to: {to_tilde(server_dir)}")
-PYEOF
+# semantic-mcp.json is self-normalising: scripts/sync.py rewrites the
+# location-dependent fields (repo_path, python_path, preload_repo_paths)
+# on every run based on the actual REPO path. No mutation needed here.
 
 # ════════════════════════════════════════════════════════════
 # STEP 1 — Prerequisites
@@ -384,8 +367,8 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 echo ""
-echo "  Current setting in semantic-mcp.json: ${BOLD}${_cur_device}${NC}"
-echo "  Detected hardware default:            ${BOLD}${_detected}${NC}"
+echo -e "  Current setting in semantic-mcp.json: ${BOLD}${_cur_device}${NC}"
+echo -e "  Detected hardware default:            ${BOLD}${_detected}${NC}"
 echo "  Valid options: cuda | rocm | mps | cpu | auto"
 echo ""
 prompt NEW_DEVICE "Device to use for semantic indexing" "$_detected"
@@ -640,8 +623,11 @@ if semantic_device == 'auto':
 embedding_model = manifest.get('embedding_model', 'jinaai/jina-code-embeddings-1.5b')
 pythonpath = os.path.join(expand(manifest.get('repo_path', server_dir)), manifest.get('pythonpath', 'src'))
 log_file = expand(manifest.get('log_file', '~/.claude/debug/abstract-fs.log'))
+preload_list = manifest.get('preload_repo_paths', []) or []
+preload_repos = ','.join(expand(p) for p in preload_list)
 
 env = {
+    'HOME': os.path.expanduser('~'),
     'MCP_TRANSPORT': 'streamable-http',
     'MCP_HOST': host,
     'MCP_PORT': port,
@@ -649,6 +635,7 @@ env = {
     'EMBEDDING_MODEL': embedding_model,
     'PYTHONPATH': pythonpath,
     'LOG_FILE': log_file,
+    'PRELOAD_REPO_PATHS': preload_repos,
     'PATH': '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/sbin',
 }
 
@@ -700,15 +687,26 @@ PYEOF
     echo ""
 
     # abstract-fs LaunchAgent (the MCP daemon)
+    # Always kill any stale daemon (from a previous repo location) before
+    # touching the plist. Otherwise an old process keeps owning :8800 and
+    # the new plist silently fails to bind.
+    _kill_stale_fs_daemon() {
+        launchctl unload "$_fs_plist" 2>/dev/null || true
+        if command -v pkill &>/dev/null; then
+            pkill -f 'abstract_fs_server.server' 2>/dev/null || true
+        fi
+    }
+
     if [[ -f "$_fs_plist" ]]; then
         ok "abstract-fs LaunchAgent already installed"
         if confirm "Reload / restart it?"; then
-            launchctl unload "$_fs_plist" 2>/dev/null || true
+            _kill_stale_fs_daemon
             _install_fs_plist
             launchctl load -w "$_fs_plist"
             ok "abstract-fs LaunchAgent reloaded"
         fi
     elif confirm "Install abstract-fs LaunchAgent (semantic MCP daemon)?"; then
+        _kill_stale_fs_daemon
         _install_fs_plist
         launchctl load -w "$_fs_plist"
         ok "abstract-fs LaunchAgent installed: $_fs_plist"
@@ -760,15 +758,21 @@ UNITEOF
         warn "Skipped. Run later: python3 scripts/install.py"
     fi
 
-    # Start abstract-fs.service if the unit file was written by sync.py
+    # Start / restart abstract-fs.service. The unit file is always rewritten
+    # by sync.py in Step 8 above, so we must daemon-reload and restart even
+    # if the unit was already active — otherwise the daemon keeps running
+    # with the old PRELOAD_REPO_PATHS / paths.
     echo ""
     if [[ -f "$_fs_unit" ]]; then
+        systemctl --user daemon-reload
         _fs_active=$(systemctl --user is-active abstract-fs.service 2>/dev/null || echo "inactive")
         if [[ "$_fs_active" == "active" ]]; then
-            ok "abstract-fs.service already running"
+            info "abstract-fs.service already running — restarting to pick up new unit..."
+            systemctl --user restart abstract-fs.service && \
+                ok "abstract-fs.service restarted" || \
+                warn "Failed to restart abstract-fs.service — check: journalctl --user -u abstract-fs.service"
         else
             info "abstract-fs.service unit installed by sync — starting it now..."
-            systemctl --user daemon-reload
             systemctl --user enable --now abstract-fs.service && \
                 ok "abstract-fs.service started" || \
                 warn "Failed to start abstract-fs.service — check: journalctl --user -u abstract-fs.service"
