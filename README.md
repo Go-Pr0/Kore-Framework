@@ -234,7 +234,7 @@ Three team skills are available. Each one turns Claude into a **team lead** that
 | `/bravo-team` | Investigate — triage then trace a bug across layers | Bravo Command |
 | `/alpha-team` | Research — parallel domain research with live verification | Alpha Command |
 
-All three support an `auto` suffix (e.g. `/delta-team auto`) to skip the interactive approval gate.
+`/delta-team` supports an `auto` suffix (e.g. `/delta-team auto`) to skip the interactive approval gate. `/bravo-team` and `/alpha-team` always run straight through.
 
 ---
 
