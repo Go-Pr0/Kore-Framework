@@ -1,0 +1,92 @@
+# ◈ Kore Framework: The Unified .gitignore
+
+# --- SYSTEM & PLATFORM ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.nfs*
+.fuse_hidden*
+
+# --- PYTHON ECOSYSTEM ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+.pytest_cache/
+.coverage
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.egg-info/
+.installed.cfg
+*.egg
+.mypy_cache/
+.pyre/
+.pytype/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+python_env/
+
+# Distribution / Build
+dist/
+build/
+lib/
+sdist/
+wheels/
+share/python-wheels/
+develop-eggs/
+
+# --- NODE.JS / FRONTEND ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+frontend/dist/
+frontend/node_modules/
+
+# --- PROJECT SPECIFIC IGNORES ---
+# Core ignores as per user request
+resources/
+research/
+test-projects/
+tickets/
+
+# Artifacts & Local Cache
+.abstract-arch/
+.abstract-index.json
+*.log
+*.sqlite
+*.db-journal
+
+# --- DOT FILES & CONFIGS (USER REQUESTED ALL EXCEPT .gitignore) ---
+# We keep .gitignore itself and .git (implicitly)
+.claude/
+.cursor/
+.vscode/
+.idea/
+.env
+.env.*
+.python-version
+.node-version
+.nvmrc
+.terraform/
+.serverless/
+.pytest_cache/
+.ipynb_checkpoints/
+.ruff_cache/
+
+# Any other generic dot files
+.*
+!.gitignore
+!.gitattributes
+!.geminiignore

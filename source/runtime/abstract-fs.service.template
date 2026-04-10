@@ -13,6 +13,7 @@ Environment=HF_HUB_OFFLINE=1
 Environment=HF_HUB_CACHE={HF_HUB_CACHE}
 Environment=PYTHONPATH={PYTHONPATH}
 Environment=LOG_FILE={LOG_FILE}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin
 {HF_EXTRAS}ExecStart={PYTHON_PATH} -m abstract_fs_server.server
 Restart=on-failure
 RestartSec=5

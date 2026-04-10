@@ -29,6 +29,9 @@ SYSTEMD_UNIT = SYSTEMD_UNIT_DIR / "abstract-fs.service"
 MANAGED_BLOCK_START = "# BEGIN CLAUDE-ORACLE MANAGED MCP"
 MANAGED_BLOCK_END = "# END CLAUDE-ORACLE MANAGED MCP"
 
+CLAUDE_MD_BLOCK_START = "<!-- BEGIN CLAUDE-ORACLE MANAGED -->"
+CLAUDE_MD_BLOCK_END = "<!-- END CLAUDE-ORACLE MANAGED -->"
+
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -67,14 +70,9 @@ def backup_dir_md_files(path: Path, root: Path, backup_root: Path) -> None:
 
 
 def sync_md_dir(src_dir: Path, dst_dir: Path, root: Path, backup_root: Path) -> None:
+    """Additive sync: copies oracle files into dst_dir, never deletes user files."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     backup_dir_md_files(dst_dir, root, backup_root)
-
-    source_names = {p.name for p in src_dir.glob("*.md")}
-    for stale in sorted(dst_dir.glob("*.md")):
-        if stale.name not in source_names:
-            stale.unlink()
-
     for src_file in sorted(src_dir.glob("*.md")):
         shutil.copy2(src_file, dst_dir / src_file.name)
 
@@ -88,13 +86,9 @@ def backup_tree(path: Path, root: Path, backup_root: Path) -> None:
 
 
 def sync_skill_dir(src_dir: Path, dst_dir: Path, root: Path, backup_root: Path) -> None:
+    """Additive sync: copies oracle skill dirs into dst_dir, never deletes user skill dirs."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     backup_tree(dst_dir, root, backup_root)
-
-    source_dirs = {p.name for p in src_dir.iterdir() if p.is_dir()} if src_dir.is_dir() else set()
-    for stale in sorted(dst_dir.iterdir()):
-        if stale.is_dir() and stale.name not in source_dirs:
-            shutil.rmtree(stale)
 
     if not src_dir.is_dir():
         return
@@ -353,6 +347,22 @@ def install_systemd_unit(emission: McpEmission, backup_root: Path) -> None:
     write_text(SYSTEMD_UNIT, rendered)
 
 
+def inject_claude_md_block(existing: str, oracle_content: str) -> str:
+    """Inject oracle content into a managed block, preserving surrounding user content."""
+    block = f"{CLAUDE_MD_BLOCK_START}\n{oracle_content.strip()}\n{CLAUDE_MD_BLOCK_END}"
+    if CLAUDE_MD_BLOCK_START in existing and CLAUDE_MD_BLOCK_END in existing:
+        start = existing.index(CLAUDE_MD_BLOCK_START)
+        end = existing.index(CLAUDE_MD_BLOCK_END) + len(CLAUDE_MD_BLOCK_END)
+        prefix = existing[:start].rstrip()
+        suffix = existing[end:].lstrip()
+        parts = [part for part in [prefix, block, suffix] if part]
+        return "\n\n".join(parts) + "\n"
+    stripped = existing.rstrip()
+    if stripped:
+        return stripped + "\n\n" + block + "\n"
+    return block + "\n"
+
+
 def generated_header(target_name: str) -> str:
     return "\n".join([
         f"<!-- GENERATED FILE: {target_name} -->",
@@ -404,13 +414,6 @@ def adapt_for_target(claude_md: str, target: str) -> str:
         )
     return text
 
-
-def render_gemini(claude_md: str) -> str:
-    return generated_header("GEMINI.md") + adapt_for_target(claude_md, "gemini")
-
-
-def render_codex(claude_md: str) -> str:
-    return generated_header("AGENTS.md") + adapt_for_target(claude_md, "codex")
 
 
 def main(dry_run: bool = False) -> None:
@@ -482,15 +485,31 @@ def main(dry_run: bool = False) -> None:
     backup_file(CODEX_CONFIG, CODEX_HOME, backup_root / "codex-home")
     backup_file(CLAUDE_CONFIG, HOME, backup_root / "home")
 
-    write_text(CLAUDE_HOME / "CLAUDE.md", claude_md)
+    claude_md_path = CLAUDE_HOME / "CLAUDE.md"
+    existing_claude_md = read_text(claude_md_path) if claude_md_path.exists() else ""
+    write_text(claude_md_path, inject_claude_md_block(existing_claude_md, claude_md))
+
     sync_md_dir(source_agents, CLAUDE_HOME / "agents", CLAUDE_HOME, backup_root / "claude-home")
+
+    # Remove oracle-managed agents that have been deprecated or renamed.
+    _deprecated_agents = ["executor-manager.md", "ticket-sub-agent.md"]
+    for name in _deprecated_agents:
+        target = CLAUDE_HOME / "agents" / name
+        if target.exists():
+            target.unlink()
     sync_md_dir(source_rules, CLAUDE_HOME / "rules", CLAUDE_HOME, backup_root / "claude-home")
     sync_skill_dir(source_skills, CLAUDE_HOME / "skills", CLAUDE_HOME, backup_root / "claude-home")
     sync_md_dir(source_teams, CLAUDE_HOME / "teams", CLAUDE_HOME, backup_root / "claude-home")
     update_claude_config(emission.server_name, emission.claude_config)
-    write_text(GEMINI_HOME / "GEMINI.md", render_gemini(claude_md))
+
+    gemini_md_path = GEMINI_HOME / "GEMINI.md"
+    existing_gemini_md = read_text(gemini_md_path) if gemini_md_path.exists() else ""
+    write_text(gemini_md_path, inject_claude_md_block(existing_gemini_md, adapt_for_target(claude_md, "gemini")))
     update_gemini_settings(emission.server_name, emission.gemini_config)
-    write_text(CODEX_HOME / "AGENTS.md", render_codex(claude_md))
+
+    codex_agents_path = CODEX_HOME / "AGENTS.md"
+    existing_codex_md = read_text(codex_agents_path) if codex_agents_path.exists() else ""
+    write_text(codex_agents_path, inject_claude_md_block(existing_codex_md, adapt_for_target(claude_md, "codex")))
     update_codex_config(emission.server_name, emission.codex_toml_lines, emission.codex_options)
 
     if emission.mode == "daemon":

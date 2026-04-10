@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "semantic-code-search": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "abstract_fs_server.server"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/gopro/Documents/claude-native-global-migration/src",
+        "LOG_LEVEL": "INFO",
+        "LOG_FILE": "/home/gopro/.claude/debug/semantic-code-search.log",
+        "WATCH_FILES": "true",
+        "SEMANTIC_SEARCH_ENABLED": "true",
+        "SEMANTIC_DEVICE": "auto",
+        "EMBEDDING_MODEL": "jinaai/jina-code-embeddings-1.5b"
+      }
+    }
+  }
+}

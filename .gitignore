@@ -1,7 +1,93 @@
-backups/
+# ============================================================
+# Kore Framework — Root .gitignore
+# ============================================================
+
+# --- SYSTEM & PLATFORM ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.nfs*
+.fuse_hidden*
+
+# --- PYTHON ECOSYSTEM ---
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+*.egg
+.mypy_cache/
+.pyre/
+.pytype/
+pip-log.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+python_env/
+
+# Distribution / Build
+dist/
+build/
+lib/
+sdist/
+wheels/
+
+# --- NODE.JS ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --- SECRETS & LOCAL CONFIG ---
+.env
+.env.*
+.python-version
+.node-version
+.nvmrc
+
+# --- PROJECT-SPECIFIC ---
+
+# Local asset / model stores (large binaries, not for source control)
+models/
 images/
 backups/
-./backups/
-.env
-models/
+
+# Planning and scratchpad artifacts
+plans/
+
+# Claude native team run workspaces (transient, machine-local)
+.team_workspace/
+
+# AI dev session artifacts (files ending in .from-ai-dev-*)
+*.from-ai-dev-*.md
+*.from-ai-dev-*.json
+*.from-ai-dev-*.py
+*.from-ai-dev-*.txt
+
+# Semantic index cache (built at runtime)
+.abstract-arch/
+.abstract-index.json
+
+# Logs and local DBs
+*.log
+*.sqlite
+*.db
+*.db-journal
+
+# --- DOT FILES & EDITOR DIRS (keep .gitignore, .gitattributes) ---
+.claude/
+.cursor/
+.vscode/
+.idea/
+.terraform/
+.serverless/
+.ipynb_checkpoints/
+.ruff_cache/

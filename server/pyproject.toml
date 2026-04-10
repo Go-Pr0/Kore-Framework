@@ -1,0 +1,49 @@
+[project]
+name = "claude-semantic-mcp"
+version = "0.1.0"
+description = "Semantic code search MCP server for native Claude Code"
+requires-python = ">=3.12"
+dependencies = [
+    "tree-sitter>=0.24",
+    "tree-sitter-language-pack",
+    "tree_sitter_python",
+    "networkx",
+    "mcp>=1.10",
+    "anyio>=4.0",
+    "watchdog>=4.0",
+    "lancedb>=0.12",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "transformers==4.52.4",
+    "torch>=2.4",
+    "torchvision",
+    "pillow",
+    "peft",
+    "requests",
+]
+
+[project.scripts]
+claude-semantic-mcp = "abstract_fs_server.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-snapshot",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+sources = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/abstract_engine", "src/abstract_fs_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/benchmark/fixtures", "tests/benchmark/results"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
