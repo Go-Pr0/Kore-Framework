@@ -55,22 +55,28 @@ flowchart LR
 
 ```
 claude-oracle/
+├── install.sh                  # Interactive installer (start here)
+├── uninstall.sh                # Clean uninstaller
 ├── source/
 │   ├── claude/
 │   │   ├── CLAUDE.md           # Global system prompt (injected into every session)
 │   │   ├── agents/             # Sub-agent & teammate definitions
 │   │   ├── rules/              # Behavioral rules (global.md, etc.)
-│   │   └── skills/             # Callable /slash-command skills
+│   │   ├── skills/             # Callable /slash-command skills
+│   │   └── removed/            # Tombstones — entries here are deleted from targets on sync
 │   └── runtime/
-│       └── semantic-mcp.json   # MCP server config (model, port, device)
+│       ├── semantic-mcp.json   # MCP server config (model, port, device)
+│       └── rtk-rewrite.sh      # Vendored RTK bash hook (deployed to ~/.claude/hooks/)
 ├── server/                     # abstract-fs MCP server (Python)
+│   ├── install.sh              # Build server/.venv (called by install.sh)
 │   └── src/
 │       ├── abstract_engine/    # Tree-sitter indexer + LanceDB embeddings
 │       └── abstract_fs_server/ # FastMCP server + tool registration
 ├── scripts/
-│   ├── install.py              # One-shot: sync + verify + install daemon
+│   ├── install.py              # Programmatic installer (sync + verify + daemon)
 │   ├── sync.py                 # Deploy source → targets + backup
 │   ├── verify.py               # Checksum all targets against source
+│   ├── init_models.py          # Download HF models into cache
 │   └── watch_sync.py           # File-watcher for auto-sync daemon
 └── backups/                    # Timestamped snapshots before each sync
 ```
@@ -79,37 +85,58 @@ claude-oracle/
 
 ## Setup
 
-### 1. Bootstrap the MCP server (first time only)
+### Quick start
 
 ```bash
-bash server/install.sh
+bash install.sh
 ```
 
-This creates `server/.venv/` with all Python dependencies including Tree-sitter, LanceDB, and the Jina embedding model. The venv is machine-local and excluded from git.
+That's it. The interactive installer walks you through every step:
 
-### 2. Install everything
-
-```bash
-python3 scripts/install.py
-```
-
-This does three things in sequence:
-
-1. Runs `sync.py` — deploys source files to all targets and backs up existing files
-2. Runs `verify.py` — checksums every deployed file and MCP wiring entry
-3. Installs the auto-sync daemon:
-   - **Linux**: `systemd --user` service (`claude-oracle-sync.service`)
-   - **macOS**: `launchd` agent (`com.claude.oracle.sync.plist`)
+| Step | What it does |
+|------|--------------|
+| 1 | Checks prerequisites (Python 3.12+, git, jq) |
+| 2 | Configures `.env` — prompts for your Hugging Face token and model cache path |
+| 3 | GPU/device selection — probes for NVIDIA/AMD, lets you set `semantic_device` |
+| 4 | Builds `server/.venv` with all Python deps (Tree-sitter, LanceDB, torch, etc.) |
+| 5 | Downloads the two Jina models into your local cache |
+| 6 | Enables offline mode in `.env` so the server never hits the network at startup |
+| 7 | Installs RTK (token compression tool) via cargo or curl |
+| 8 | Runs `sync.py` — deploys agents, skills, rules, hooks, and MCP config |
+| 9 | Installs the auto-sync daemon (systemd on Linux, launchd on macOS) |
+| 10 | Runs `verify.py` — checksums every deployed file and MCP wiring entry |
 
 After install, any change you make under `source/` is automatically synced within seconds.
 
-### 3. Verify the deployment
+Pass `--yes` to accept all defaults non-interactively:
+
+```bash
+bash install.sh --yes
+```
+
+### Verify the deployment
 
 ```bash
 python3 scripts/verify.py
 ```
 
 Prints a line per check (`OK` / `FAIL`). Exits non-zero if anything is out of sync.
+
+### Uninstall
+
+```bash
+bash uninstall.sh
+```
+
+Shows a full removal plan before doing anything, then cleanly removes everything Kore deployed:
+
+- Stops and removes the systemd services (or macOS LaunchAgent)
+- Removes oracle-placed agent, skill, and rule files from `~/.claude/`
+- Strips the managed block from `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.codex/AGENTS.md` — preserving any surrounding user content
+- Removes the `abstract-fs` MCP entry from `~/.claude.json` and `~/.gemini/settings.json`
+- Removes the RTK hook entry from `~/.claude/settings.json`
+
+Does **not** remove this repo, model downloads, the semantic index cache, the RTK binary, or any file it did not place.
 
 ---
 
