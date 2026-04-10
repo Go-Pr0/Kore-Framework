@@ -1,12 +1,12 @@
 ---
 name: research
-description: Add-on for /team-lead. Inserts a parallel research phase before ticketing. You decide how many researchers based on distinct knowledge domains in the task.
+description: Add-on for /delta-team. Inserts a parallel d-recon phase before Vector. You decide how many d-recon agents based on distinct knowledge domains in the task.
 user_invocable: true
 ---
 
 <research_addon>
   <purpose>
-    This add-on instructs you on how to run a research phase as part of a /team-lead pipeline.
+    This add-on instructs you on how to run a research phase as part of a /delta-team pipeline.
     Invoke this when the task has genuine unknowns that need external lookup before a ticket can be written:
     unfamiliar APIs, library breaking changes, competitor patterns, architectural precedents, etc.
     Do NOT invoke for tasks where the codebase itself is the only source of truth.
@@ -22,30 +22,33 @@ user_invocable: true
   </how_many_researchers>
 
   <vision_md_instructions>
-    When writing vision.md with research enabled, the Agents section must specify for each researcher:
+    When writing vision.md with research enabled, the Agents section must specify for each d-recon agent:
     - Exact research question (scoped, not vague)
     - Output file name: workspace/research_{topic}.md
-    - Who to message when done: ticket-agent
-    - What the ticket-agent waits for: list all research_{topic}.md files
+    - Who to message when done: d-vector
+    - What Vector waits for: list all research_{topic}.md files
 
-    The ticket-agent entry must say: "Wait for [N] research files: [list them]. Do not proceed until all exist."
+    The Vector entry must say: "Wait for [N] research files: [list them]. Do not proceed until all exist."
   </vision_md_instructions>
 
   <researcher_spawn_prompt>
-    Each researcher spawn prompt must include:
+    Each d-recon spawn prompt must include:
     - workspace_dir and vision.md path (they read it for their output filename and message target)
     - The specific research question
-    - "Write findings to workspace/{filename} per vision.md. Message ticket-agent when done."
-    Do not give researchers more than one question each. Keep scope tight.
+    - "Write findings to workspace/{filename} per vision.md. Message d-vector when done."
+    Do not give d-recon agents more than one question each. Keep scope tight.
   </researcher_spawn_prompt>
 
   <pipeline_shape>
     With /research, the vision.md Pipeline section looks like:
 
-      Researcher A (research_{a}.md) ↘
-      Researcher B (research_{b}.md)  → Ticket Agent → Executor 1 → [Executor N] → [Done]
-      [Researcher N]                  ↗
+      Recon A (research_{a}.md) ↘
+      Recon B (research_{b}.md)  → Vector → [team-lead: schedule] → raptor-1 ↘
+      [Recon N]                  ↗                                              → [team-lead] → [Done]
+                                                                    raptor-2 ↗
 
-    Researchers run in parallel. Ticket agent waits for all of them.
+    Researchers run in parallel. Ticket agent waits for all of them. After ticket approval,
+    team-lead writes the Execution Schedule and executors run in parallel where their depends_on
+    allows it. All executors report to team-lead.
   </pipeline_shape>
 </research_addon>

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from plistlib import dumps as plist_dumps
@@ -63,9 +64,29 @@ def install_launch_agent() -> None:
     print("Claude oracle sync is enabled and running.")
 
 
+def install_rtk() -> None:
+    """Ensure the rtk binary is installed. Uses cargo if available, else curl installer."""
+    if shutil.which("rtk"):
+        print("RTK: already installed.")
+        return
+    print("RTK: not found, installing...")
+    if shutil.which("cargo"):
+        run(["cargo", "install", "--git", "https://github.com/rtk-ai/rtk"])
+    elif shutil.which("curl"):
+        run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh"])
+    else:
+        print("RTK: WARNING — neither cargo nor curl found. Install rtk manually: https://github.com/rtk-ai/rtk#installation", file=sys.stderr)
+        return
+    if shutil.which("rtk"):
+        print("RTK: installed successfully.")
+    else:
+        print("RTK: WARNING — installation completed but rtk not found in PATH. You may need to restart your shell.", file=sys.stderr)
+
+
 def main() -> None:
+    install_rtk()
     run([sys.executable, str(REPO / "scripts" / "sync.py")])
-    run([sys.executable, str(REPO / "scripts" / "verify.py")])
+    run([sys.executable, str(REPO / "scripts" / "verify.py")], check=False)
     if system() == "Darwin":
         install_launch_agent()
     else:

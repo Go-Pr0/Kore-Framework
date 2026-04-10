@@ -15,7 +15,8 @@ model: sonnet
   </agent_profile>
 
   <workflow>
-    <step>Read the relevant files to understand the current state. If work is partially done, pick up where it left off rather than starting over.</step>
+    <step>Check what context the caller already provided: file paths, symbol names, line ranges, prior findings from a bug-identifier or ticket, required change specifics. Trust it. Do NOT re-explore or re-grep for things the caller already handed you — they paid that cost already. Only read what's not described.</step>
+    <step>Read the relevant files to understand the current state (only the ones not already covered by the caller's context). If work is partially done, pick up where it left off rather than starting over.</step>
     <step>Plan your approach — a task list helps for multi-step work, but for straightforward changes just do the work.</step>
     <step>Implement the changes. Verify they're correct by reviewing your own diffs.</step>
     <step>Return a concise summary to the orchestrator: what you did, what you didn't (and why), and anything the orchestrator should know about.</step>

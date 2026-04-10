@@ -14,11 +14,11 @@ If the `abstract-fs` semantic MCP server is available, use it aggressively in an
 
 # Agent Systems
 
-Two distinct agent systems exist. Which one to use depends solely on whether `/team-lead` was invoked.
+Two distinct agent systems exist. Which one to use depends solely on whether `/delta-team` was invoked.
 
 ## Sub-agents (default)
 
-When the user has NOT invoked `/team-lead`, YOU are the orchestrator. Spawn sub-agents via `Agent(subagent_type=...)` as needed. Each runs, returns a result, and you decide what to do next.
+When the user has NOT invoked `/delta-team`, YOU are the orchestrator. Spawn sub-agents via `Agent(subagent_type=...)` as needed. Each runs, returns a result, and you decide what to do next.
 
 Available sub-agents: `ticket-agent`, `worker-agent`, `bug-identifier-agent`, `researcher-agent`, `reviewer-agent`
 
@@ -29,11 +29,72 @@ Sequence them based on what the task actually needs — no fixed tiers, just jud
 - Simple, obvious change → `worker-agent` directly
 - Non-trivial implementation that warrants verification → `reviewer-agent` after workers
 
-## Teammates (only inside `/team-lead`)
+### Trivial tasks: answer directly, do NOT spawn
 
-When the user invoked `/team-lead`, you become the team lead. Teammates are spawned via `TeamCreate` and communicate via `SendMessage`. They self-route through the pipeline — you only re-enter at gates and completion.
+Agents carry a fixed boot cost (full system prompt + tool round-trips). For work that finishes in one or two direct tool calls, spawning an agent is pure overhead. Handle these yourself:
 
-Available teammates: `team-ticket-agent`, `team-executor`, `team-researcher`, `team-reviewer`
+- Questions about the codebase, architecture, or how something works
+- Typo fixes, single-line edits, renames in a known file
+- Anything resolvable with ≤2 Reads and 1 Edit
+- Config tweaks with a fully specified target
+
+Only escalate to an agent when the work genuinely benefits from isolated context (wide exploration, multi-file edits, verification).
+
+### Pass context into agents (no re-discovery tax)
+
+When you spawn an agent after doing your own exploration, hand over what you already know: exact file paths, symbol names, relevant line ranges, prior findings, and the specific change required. Every re-read of a file you already opened is wasted tokens.
+
+All sub-agents (`ticket-agent`, `worker-agent`, `bug-identifier-agent`, `reviewer-agent`) are instructed to trust pre-gathered context when supplied and skip re-discovery. Use it — don't hand them a one-line task and force them to rebuild your map.
+
+Likewise, between sequenced agents (identifier → worker, ticket → worker, worker → reviewer): forward the prior agent's concrete findings in the next spawn prompt, not just a task restatement.
+
+### Parallel workers — split by domain, never by files
+
+When a task has genuinely independent sub-problems along **domain boundaries**, spawn workers in parallel in a single message — one per domain. Examples of valid splits:
+
+- Parser changes vs. CLI wiring
+- Backend API vs. frontend UI
+- Auth layer vs. rate limiter
+- Database migration vs. application code consuming it
+
+The test: *could these halves ship as two independent PRs without either breaking the other?* If yes, parallelize. If no, one worker.
+
+**Do NOT split by file count.** Files in the same domain share types, invariants, and conventions; two workers editing them in parallel will make incompatible assumptions and collide. A 10-file single-domain change is still one worker.
+
+### Reviewer: quick vs full
+
+- **Quick** — diff-only sanity check, no extra file reads. Use for small, single-domain changes. Say `quick review` in the prompt.
+- **Full** — diff plus surrounding context, constraint checks. Use for multi-file, architectural, or security-sensitive changes.
+
+## Model routing for sub-agents
+
+Always set `model` explicitly when spawning any sub-agent. Three tiers:
+
+**opus** — Reserve for phases/tasks requiring genuine deep reasoning:
+- Core logic: algorithms, data transformations, state machines, complex control flow
+- Security-sensitive code
+- Architectural decisions affecting multiple systems
+- Elusive bugs spanning multiple domains
+- Ticket analysis for highly ambiguous or architecturally novel tasks
+
+**sonnet** — Default. Use when in doubt:
+- Most ticket analysis and planning
+- General multi-file implementation
+- Reviews, research, diagnosis
+
+**haiku** — Only for zero-reasoning mechanical tasks with no judgment required:
+- Rename a constant across files
+- Update a config key or add a trivial field
+- Pure search-and-replace with fully specified inputs
+- If ANY ambiguity exists, use sonnet instead
+
+For teams: the ticket's `model_hint` per phase drives executor model selection. For sub-agents: read the ticket phases and spawn each worker with the appropriate model.
+
+## Teammates (only inside `/delta-team`)
+
+When the user invoked `/delta-team`, you become the team lead. Teammates are spawned via `TeamCreate` and communicate via `SendMessage`. They self-route through the pipeline — you only re-enter at gates and completion.
+
+Available teammates: `vector`, `raptor`, `recon`, `apex`
 
 # Team Workspace Convention
 
@@ -44,12 +105,12 @@ Every native team run creates a workspace directory at:
 This path is created by the team lead before any agent is spawned and is passed to every teammate in their spawn prompt. All agents write their artifacts here — never elsewhere.
 
 Structure within a workspace:
-  vision.md              — pipeline contract (written by team lead, read by everyone)
-  ticket.json            — written by ticket-agent
-  research_{topic}.md    — written by each researcher (one file per researcher)
-  phase_{N}/
-    handoff.json         — written by team-executor for phase N (contains changes_summary)
-  review.md              — written by team-reviewer
-  handoff.json           — final handoff written by team-lead at completion
+  vision.md              — pipeline contract + Execution Schedule (written by team lead in two passes, read by everyone)
+  ticket.json            — written by vector (waves with depends_on DAG)
+  research_{topic}.md    — written by each recon agent (one file per recon)
+  wave_{N}/
+    handoff.json         — written by raptor for wave N (contains changes_summary)
+  review.md              — written by apex (includes chosen quick|full mode)
+  handoff.json           — final handoff written by delta-command at completion
 
 No agent may create files outside this workspace directory except when editing actual production code files in the project.

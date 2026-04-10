@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 
@@ -11,11 +12,15 @@ REPO = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPO / "source"
 SOURCE = SOURCE_ROOT / "claude"
 RUNTIME = SOURCE_ROOT / "runtime"
+CLAUDE_HOME = HOME / ".claude"
 CLAUDE_CONFIG = HOME / ".claude.json"
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
+CLAUDE_HOOKS_DIR = CLAUDE_HOME / "hooks"
 GEMINI_SETTINGS = HOME / ".gemini" / "settings.json"
 CODEX_CONFIG = HOME / ".codex" / "config.toml"
 MANAGED_BLOCK_START = "# BEGIN CLAUDE-ORACLE MANAGED MCP"
 MANAGED_BLOCK_END = "# END CLAUDE-ORACLE MANAGED MCP"
+RTK_HOOK_MARKER = "rtk-rewrite"
 
 
 def sha256(path: Path) -> str:
@@ -24,6 +29,13 @@ def sha256(path: Path) -> str:
 
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def source_content_deployed(src: Path, dst: Path) -> bool:
+    """Check that dst contains the source content (handles managed-block wrapping)."""
+    if not dst.exists():
+        return False
+    return src.read_text(encoding="utf-8").strip() in dst.read_text(encoding="utf-8")
 
 
 def collect_skill_checks() -> list[tuple[str, bool]]:
@@ -48,35 +60,43 @@ def collect_team_checks() -> list[tuple[str, bool]]:
     return checks
 
 
-def load_server_name() -> str:
-    manifest = load_json(RUNTIME / "semantic-mcp.json")
-    return manifest["semantic_mcp"]["name"]
-
-
-def load_expected_server() -> tuple[str, str, int | None, dict[str, str]]:
+def load_server_config() -> dict:
+    """Return a mode-aware dict describing the expected MCP server deployment."""
     manifest = load_json(RUNTIME / "semantic-mcp.json")
     server = manifest["semantic_mcp"]
-    expected_env = {
-        "PYTHONPATH": str(Path(server["repo_path"]).expanduser() / server["pythonpath"]),
-        "EMBEDDING_MODEL": server.get("embedding_model", "jinaai/jina-code-embeddings-1.5b"),
-        "SEMANTIC_DEVICE": server.get("semantic_device", "auto"),
-        "LOG_FILE": str(Path(server["log_file"]).expanduser()),
+    mode = server.get("mode", "stdio")
+    cfg: dict = {
+        "name": server["name"],
+        "mode": mode,
+        "codex_timeout": server.get("codex_startup_timeout_sec"),
     }
-    return (
-        server["name"],
-        str(Path(server["python_path"]).expanduser()),
-        server.get("codex_startup_timeout_sec"),
-        expected_env,
-    )
+    if mode == "daemon":
+        host = server.get("host", "127.0.0.1")
+        port = server.get("port", 8800)
+        mount = server.get("mount_path", "/mcp")
+        cfg["url"] = f"http://{host}:{port}{mount}"
+    else:
+        cfg["command"] = str(Path(server["python_path"]).expanduser())
+        cfg["env"] = {
+            "PYTHONPATH": str(Path(server["repo_path"]).expanduser() / server["pythonpath"]),
+            "EMBEDDING_MODEL": server.get("embedding_model", "jinaai/jina-code-embeddings-1.5b"),
+            "SEMANTIC_DEVICE": server.get("semantic_device", "auto"),
+            "LOG_FILE": str(Path(server["log_file"]).expanduser()),
+        }
+    return cfg
 
 
 def main() -> None:
     checks: list[tuple[str, bool]] = []
-    server_name, expected_command, expected_codex_timeout, expected_env = load_expected_server()
+    cfg = load_server_config()
+    server_name: str = cfg["name"]
+    mode: str = cfg["mode"]
+    codex_timeout = cfg["codex_timeout"]
 
+    # CLAUDE.md: source content must be present in deployed file (wrapped in managed block)
     checks.append((
         "claude-md",
-        sha256(SOURCE / "CLAUDE.md") == sha256(HOME / ".claude" / "CLAUDE.md"),
+        source_content_deployed(SOURCE / "CLAUDE.md", CLAUDE_HOME / "CLAUDE.md"),
     ))
 
     for src in sorted((SOURCE / "agents").glob("*.md")):
@@ -90,62 +110,69 @@ def main() -> None:
     checks.extend(collect_skill_checks())
     checks.extend(collect_team_checks())
 
+    # --- Claude MCP ---
     claude_config = load_json(CLAUDE_CONFIG)
-    claude_server_ok = server_name in claude_config.get("mcpServers", {})
-    checks.append(("claude-mcp", claude_server_ok))
-    checks.append((
-        "claude-mcp-command",
-        claude_config.get("mcpServers", {}).get(server_name, {}).get("command") == expected_command,
-    ))
-    checks.append((
-        "claude-mcp-env",
-        claude_config.get("mcpServers", {}).get(server_name, {}).get("env") == expected_env,
-    ))
+    deployed_claude = claude_config.get("mcpServers", {}).get(server_name, {})
+    checks.append(("claude-mcp", server_name in claude_config.get("mcpServers", {})))
+    if mode == "daemon":
+        checks.append(("claude-mcp-url", deployed_claude.get("url") == cfg["url"]))
+    else:
+        checks.append(("claude-mcp-command", deployed_claude.get("command") == cfg["command"]))
+        checks.append(("claude-mcp-env", deployed_claude.get("env") == cfg["env"]))
 
-    gemini_exists = (HOME / ".gemini" / "GEMINI.md").exists()
-    codex_exists = (HOME / ".codex" / "AGENTS.md").exists()
-    checks.append(("gemini-md", gemini_exists))
-    checks.append(("codex-agents", codex_exists))
+    # --- Gemini ---
+    checks.append(("gemini-md", (HOME / ".gemini" / "GEMINI.md").exists()))
     if GEMINI_SETTINGS.exists():
         gemini_settings = load_json(GEMINI_SETTINGS)
+        deployed_gemini = gemini_settings.get("mcpServers", {}).get(server_name, {})
         checks.append(("gemini-mcp", server_name in gemini_settings.get("mcpServers", {})))
-        checks.append((
-            "gemini-mcp-command",
-            gemini_settings.get("mcpServers", {}).get(server_name, {}).get("command") == expected_command,
-        ))
-        checks.append((
-            "gemini-mcp-env",
-            gemini_settings.get("mcpServers", {}).get(server_name, {}).get("env") == expected_env,
-        ))
+        if mode == "daemon":
+            checks.append(("gemini-mcp-url", deployed_gemini.get("httpUrl") == cfg["url"]))
+        else:
+            checks.append(("gemini-mcp-command", deployed_gemini.get("command") == cfg["command"]))
+            checks.append(("gemini-mcp-env", deployed_gemini.get("env") == cfg["env"]))
     else:
         checks.append(("gemini-mcp", False))
-        checks.append(("gemini-mcp-command", False))
-        checks.append(("gemini-mcp-env", False))
+        checks.append(("gemini-mcp-url" if mode == "daemon" else "gemini-mcp-command", False))
+
+    # --- Codex ---
+    checks.append(("codex-agents", (HOME / ".codex" / "AGENTS.md").exists()))
     if CODEX_CONFIG.exists():
-        codex_config = CODEX_CONFIG.read_text(encoding="utf-8")
-        checks.append(("codex-mcp", MANAGED_BLOCK_START in codex_config and f"[mcp_servers.{server_name}]" in codex_config))
-        checks.append(("codex-mcp-command", f'command = "{expected_command}"' in codex_config))
-        expected_env_fragments = [
-            f'PYTHONPATH = "{expected_env["PYTHONPATH"]}"',
-            f'EMBEDDING_MODEL = "{expected_env["EMBEDDING_MODEL"]}"',
-            f'SEMANTIC_DEVICE = "{expected_env["SEMANTIC_DEVICE"]}"',
-            f'LOG_FILE = "{expected_env["LOG_FILE"]}"',
-        ]
-        checks.append((
-            "codex-mcp-env",
-            all(fragment in codex_config for fragment in expected_env_fragments),
-        ))
-        if expected_codex_timeout is not None:
-            checks.append((
-                "codex-mcp-startup-timeout",
-                f"startup_timeout_sec = {expected_codex_timeout}" in codex_config,
-            ))
+        codex_text = CODEX_CONFIG.read_text(encoding="utf-8")
+        checks.append(("codex-mcp", MANAGED_BLOCK_START in codex_text and f"[mcp_servers.{server_name}]" in codex_text))
+        if mode == "daemon":
+            checks.append(("codex-mcp-url", f'url = "{cfg["url"]}"' in codex_text))
+        else:
+            checks.append(("codex-mcp-command", f'command = "{cfg["command"]}"' in codex_text))
+            env_frags = [
+                f'PYTHONPATH = "{cfg["env"]["PYTHONPATH"]}"',
+                f'EMBEDDING_MODEL = "{cfg["env"]["EMBEDDING_MODEL"]}"',
+                f'SEMANTIC_DEVICE = "{cfg["env"]["SEMANTIC_DEVICE"]}"',
+                f'LOG_FILE = "{cfg["env"]["LOG_FILE"]}"',
+            ]
+            checks.append(("codex-mcp-env", all(f in codex_text for f in env_frags)))
+        if codex_timeout is not None:
+            checks.append(("codex-mcp-startup-timeout", f"startup_timeout_sec = {codex_timeout}" in codex_text))
     else:
         checks.append(("codex-mcp", False))
-        checks.append(("codex-mcp-command", False))
-        checks.append(("codex-mcp-env", False))
-        if expected_codex_timeout is not None:
+        checks.append(("codex-mcp-url" if mode == "daemon" else "codex-mcp-command", False))
+        if codex_timeout is not None:
             checks.append(("codex-mcp-startup-timeout", False))
+
+    # --- RTK ---
+    checks.append(("rtk-binary", shutil.which("rtk") is not None))
+    checks.append(("rtk-hook-script", (CLAUDE_HOOKS_DIR / "rtk-rewrite.sh").exists()))
+    rtk_hook_wired = False
+    if CLAUDE_SETTINGS.exists():
+        try:
+            settings = load_json(CLAUDE_SETTINGS)
+            for entry in settings.get("hooks", {}).get("PreToolUse", []):
+                for h in entry.get("hooks", []):
+                    if RTK_HOOK_MARKER in h.get("command", ""):
+                        rtk_hook_wired = True
+        except (json.JSONDecodeError, KeyError):
+            pass
+    checks.append(("rtk-hook-wired", rtk_hook_wired))
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:

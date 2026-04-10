@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -136,6 +137,29 @@ class RepoRegistry:
                         exc,
                     )
 
+    def preload_sync(self, repo_paths: list[str]) -> None:
+        """Build bundles synchronously for ``repo_paths`` (startup preload only).
+
+        Intended for use in ``_eager_startup()`` before the asyncio event loop
+        starts.  Each bundle's abstract index is built inline; the semantic
+        embedding build is offloaded to a daemon thread so it runs concurrently
+        with the server coming up.
+
+        Paths already in the registry are skipped.
+        """
+        for path in repo_paths:
+            resolved = str(Path(path).expanduser().resolve())
+            if resolved in self._bundles:
+                continue
+            try:
+                bundle = self._build_sync(resolved)
+                self._bundles[resolved] = bundle
+                log.info("RepoRegistry.preload_sync: loaded %s", resolved)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "RepoRegistry.preload_sync: failed for %s: %s", path, exc
+                )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -219,10 +243,124 @@ class RepoRegistry:
                     model=config.embedding_model,
                     device=config.embedding_device,
                 )
-            asyncio.ensure_future(semantic.async_build_from_index(index))
-            log.info("RepoRegistry: SemanticIndex build scheduled for %s", resolved)
+            # Restore from disk if the fingerprint matches; only rebuild if stale.
+            restored = await asyncio.to_thread(semantic.try_load_from_disk, index)
+            if not restored:
+                asyncio.ensure_future(semantic.async_build_from_index(index))
+                log.info("RepoRegistry: SemanticIndex build scheduled for %s", resolved)
+            else:
+                log.info("RepoRegistry: SemanticIndex restored from disk for %s", resolved)
 
         # Start file watcher.
+        watcher: FileWatcher | None = None
+        if config.watch_files:
+            watcher = FileWatcher(
+                index,
+                resolved,
+                semantic_index=semantic,
+                path_filter=path_filter,
+            )
+            watcher.start()
+
+        return RepoBundle(
+            repo_root=resolved,
+            config=config,
+            index=index,
+            semantic=semantic,
+            watcher=watcher,
+            write_lock=asyncio.Lock(),
+        )
+
+    def _build_sync(self, resolved: str) -> RepoBundle:
+        """Synchronous counterpart to ``_build`` for use before the event loop starts.
+
+        Builds the AbstractIndex inline.  If the semantic index cannot be
+        restored from disk, spawns a daemon thread to run ``build_from_index``
+        so embedding happens concurrently with server startup.
+        """
+        path = Path(resolved)
+        if not path.exists():
+            raise ValueError(f"repo_path does not exist: {resolved!r}")
+        if not path.is_dir():
+            raise ValueError(f"repo_path is not a directory: {resolved!r}")
+
+        log.info("RepoRegistry: building bundle (sync) for %s", resolved)
+
+        per_repo_cache = repo_cache_dir(resolved, self._base_config.cache_root)
+        config = ServerConfig(
+            repo_root=resolved,
+            cache_root=self._base_config.cache_root,
+            repo_cache_dir=per_repo_cache,
+            abstract_index_path=os.path.join(per_repo_cache, "abstract-index.json"),
+            lancedb_path=os.path.join(per_repo_cache, "semantic-index"),
+            watch_files=self._base_config.watch_files,
+            log_level=self._base_config.log_level,
+            log_file=self._base_config.log_file,
+            include_private_functions=self._base_config.include_private_functions,
+            languages=self._base_config.languages,
+            extra_extensions=self._base_config.extra_extensions,
+            exclude_patterns=self._base_config.exclude_patterns,
+            semantic_search_enabled=self._base_config.semantic_search_enabled,
+            embedding_model=self._base_config.embedding_model,
+            embedding_device=self._base_config.embedding_device,
+            expand_dependency_docstrings=self._base_config.expand_dependency_docstrings,
+        )
+
+        os.makedirs(per_repo_cache, exist_ok=True)
+
+        path_filter = PathFilter(
+            config.repo_root,
+            extra_patterns=config.exclude_patterns,
+        )
+
+        from abstract_engine.index import AbstractIndex  # noqa: PLC0415
+
+        index = AbstractIndex.load_or_build(
+            config.repo_root,
+            {
+                "include_private": config.include_private_functions,
+                "exclude_patterns": config.exclude_patterns,
+                "languages": config.languages,
+                "index_path": config.abstract_index_path,
+                "extra_extensions": config.extra_extensions,
+            },
+        )
+        log.info(
+            "RepoRegistry: AbstractIndex (sync) ready for %s — %d files",
+            resolved,
+            len(index.files),
+        )
+
+        semantic: SemanticIndex | None = None
+        if config.semantic_search_enabled:
+            if self._embedder is not None:
+                semantic = SemanticIndex(
+                    config.lancedb_path,
+                    embedder=self._embedder,
+                    reranker=self._reranker,
+                )
+            else:
+                semantic = SemanticIndex(
+                    config.lancedb_path,
+                    model=config.embedding_model,
+                    device=config.embedding_device,
+                )
+            if not semantic.try_load_from_disk(index):
+                t = threading.Thread(
+                    target=semantic.build_from_index,
+                    args=(index,),
+                    daemon=True,
+                    name=f"semantic-build-{path.name}",
+                )
+                t.start()
+                log.info(
+                    "RepoRegistry: SemanticIndex build thread started for %s", resolved
+                )
+            else:
+                log.info(
+                    "RepoRegistry: SemanticIndex restored from disk for %s", resolved
+                )
+
         watcher: FileWatcher | None = None
         if config.watch_files:
             watcher = FileWatcher(

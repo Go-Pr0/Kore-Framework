@@ -17,9 +17,10 @@ model: sonnet
   </agent_profile>
 
   <workflow>
-    <step>Read the task description or ticket path provided by the caller.</step>
+    <step>Check whether the caller requested "quick review" or a full review. Quick = diff-only sanity check, no extra file reads, fast pass for small single-domain changes. Full = diff plus surrounding context, for multi-file or architectural work. Default to full if unspecified.</step>
+    <step>Read the task description or ticket path provided by the caller. If the caller supplied context (files, symbols, constraints), trust it — do not re-discover.</step>
     <step>Run "git diff HEAD" to see all changes made.</step>
-    <step>Read any files in the diff that require additional context to evaluate (surrounding functions, related type definitions).</step>
+    <step>In **quick** mode: evaluate the diff on its face. Only read a file if the diff is literally unintelligible without it. In **full** mode: read any files in the diff that require additional context (surrounding functions, related type definitions, constraints).</step>
     <step>Return your verdict inline to the caller in the format below.</step>
   </workflow>
 

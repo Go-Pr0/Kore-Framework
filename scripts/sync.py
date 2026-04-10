@@ -21,10 +21,16 @@ CLAUDE_HOME = HOME / ".claude"
 GEMINI_HOME = HOME / ".gemini"
 CODEX_HOME = HOME / ".codex"
 CLAUDE_CONFIG = HOME / ".claude.json"
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
+CLAUDE_HOOKS_DIR = CLAUDE_HOME / "hooks"
 GEMINI_SETTINGS = GEMINI_HOME / "settings.json"
 CODEX_CONFIG = CODEX_HOME / "config.toml"
 SYSTEMD_UNIT_DIR = HOME / ".config" / "systemd" / "user"
 SYSTEMD_UNIT = SYSTEMD_UNIT_DIR / "abstract-fs.service"
+
+# RTK hook command — calls the vendored script deployed to ~/.claude/hooks/
+RTK_HOOK_COMMAND = "bash ~/.claude/hooks/rtk-rewrite.sh"
+RTK_HOOK_MARKER = "rtk-rewrite"
 
 MANAGED_BLOCK_START = "# BEGIN CLAUDE-ORACLE MANAGED MCP"
 MANAGED_BLOCK_END = "# END CLAUDE-ORACLE MANAGED MCP"
@@ -98,6 +104,32 @@ def sync_skill_dir(src_dir: Path, dst_dir: Path, root: Path, backup_root: Path) 
         if skill_dst.exists():
             shutil.rmtree(skill_dst)
         shutil.copytree(skill_src, skill_dst)
+
+
+def apply_removals(removed_dir: Path, dst_root: Path) -> None:
+    """Delete skills/agents listed under removed/ from the destination.
+
+    removed/skills/<name>/  → deletes ~/.claude/skills/<name>/
+    removed/agents/<name>.md → deletes ~/.claude/agents/<name>.md
+    """
+    if not removed_dir.is_dir():
+        return
+
+    removed_skills = removed_dir / "skills"
+    if removed_skills.is_dir():
+        dst_skills = dst_root / "skills"
+        for marker in sorted(p for p in removed_skills.iterdir() if p.is_dir()):
+            target = dst_skills / marker.name
+            if target.exists():
+                shutil.rmtree(target)
+
+    removed_agents = removed_dir / "agents"
+    if removed_agents.is_dir():
+        dst_agents = dst_root / "agents"
+        for marker in sorted(removed_agents.glob("*.md")):
+            target = dst_agents / marker.name
+            if target.exists():
+                target.unlink()
 
 
 def expand_path(raw: str) -> Path:
@@ -416,6 +448,44 @@ def adapt_for_target(claude_md: str, target: str) -> str:
 
 
 
+def deploy_rtk_hook_script() -> None:
+    """Copy the vendored rtk-rewrite.sh into ~/.claude/hooks/."""
+    src = RUNTIME / "rtk-rewrite.sh"
+    if not src.exists():
+        raise SystemExit(f"Missing RTK hook script: {src}")
+    CLAUDE_HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    dst = CLAUDE_HOOKS_DIR / "rtk-rewrite.sh"
+    shutil.copy2(src, dst)
+    dst.chmod(0o755)
+
+
+def inject_rtk_hook(settings_path: Path) -> None:
+    """Merge the RTK PreToolUse hook into ~/.claude/settings.json non-destructively."""
+    data = load_json(settings_path) if settings_path.exists() else {}
+    hooks = data.setdefault("hooks", {})
+    pre_hooks = hooks.setdefault("PreToolUse", [])
+
+    # Idempotent: skip if already wired
+    for entry in pre_hooks:
+        for h in entry.get("hooks", []):
+            if RTK_HOOK_MARKER in h.get("command", ""):
+                return
+
+    rtk_entry = {
+        "matcher": "Bash",
+        "hooks": [
+            {
+                "type": "command",
+                "command": RTK_HOOK_COMMAND,
+                "timeout": 10,
+                "statusMessage": "RTK: compressing bash output...",
+            }
+        ],
+    }
+    pre_hooks.insert(0, rtk_entry)
+    write_json(settings_path, data)
+
+
 def main(dry_run: bool = False) -> None:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_root = BACKUPS / timestamp
@@ -479,6 +549,7 @@ def main(dry_run: bool = False) -> None:
     backup_dir_md_files(CLAUDE_HOME / "rules", CLAUDE_HOME, backup_root / "claude-home")
     backup_tree(CLAUDE_HOME / "skills", CLAUDE_HOME, backup_root / "claude-home")
     backup_dir_md_files(CLAUDE_HOME / "teams", CLAUDE_HOME, backup_root / "claude-home")
+    backup_file(CLAUDE_SETTINGS, CLAUDE_HOME, backup_root / "claude-home")
     backup_file(GEMINI_HOME / "GEMINI.md", GEMINI_HOME, backup_root / "gemini-home")
     backup_file(GEMINI_SETTINGS, GEMINI_HOME, backup_root / "gemini-home")
     backup_file(CODEX_HOME / "AGENTS.md", CODEX_HOME, backup_root / "codex-home")
@@ -490,15 +561,9 @@ def main(dry_run: bool = False) -> None:
     write_text(claude_md_path, inject_claude_md_block(existing_claude_md, claude_md))
 
     sync_md_dir(source_agents, CLAUDE_HOME / "agents", CLAUDE_HOME, backup_root / "claude-home")
-
-    # Remove oracle-managed agents that have been deprecated or renamed.
-    _deprecated_agents = ["executor-manager.md", "ticket-sub-agent.md"]
-    for name in _deprecated_agents:
-        target = CLAUDE_HOME / "agents" / name
-        if target.exists():
-            target.unlink()
     sync_md_dir(source_rules, CLAUDE_HOME / "rules", CLAUDE_HOME, backup_root / "claude-home")
     sync_skill_dir(source_skills, CLAUDE_HOME / "skills", CLAUDE_HOME, backup_root / "claude-home")
+    apply_removals(SOURCE / "removed", CLAUDE_HOME)
     sync_md_dir(source_teams, CLAUDE_HOME / "teams", CLAUDE_HOME, backup_root / "claude-home")
     update_claude_config(emission.server_name, emission.claude_config)
 
@@ -511,6 +576,9 @@ def main(dry_run: bool = False) -> None:
     existing_codex_md = read_text(codex_agents_path) if codex_agents_path.exists() else ""
     write_text(codex_agents_path, inject_claude_md_block(existing_codex_md, adapt_for_target(claude_md, "codex")))
     update_codex_config(emission.server_name, emission.codex_toml_lines, emission.codex_options)
+
+    deploy_rtk_hook_script()
+    inject_rtk_hook(CLAUDE_SETTINGS)
 
     if emission.mode == "daemon":
         install_systemd_unit(emission, backup_root)
@@ -528,6 +596,8 @@ def main(dry_run: bool = False) -> None:
     print(f"- {GEMINI_SETTINGS}")
     print(f"- {CODEX_HOME / 'AGENTS.md'}")
     print(f"- {CODEX_CONFIG}")
+    print(f"- {CLAUDE_SETTINGS} (RTK PreToolUse hook)")
+    print(f"- {CLAUDE_HOOKS_DIR / 'rtk-rewrite.sh'}")
 
     if emission.mode == "daemon":
         print(f"- {SYSTEMD_UNIT}")

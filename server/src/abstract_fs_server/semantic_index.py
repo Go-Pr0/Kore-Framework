@@ -8,12 +8,26 @@ Pipeline:           embed -> hybrid (vector + FTS) -> RRF merge -> Jina rerank
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
 _SIGNATURE_RANGE_TAIL = re.compile(r"\s+L\d+-\d+\s*$")
 _STRUCTURED_RECORD_TYPES = frozenset({"function", "method", "class", "type", "file"})
+
+
+def _compute_index_fingerprint(abstract_index: AbstractIndex) -> str:
+    """Stable fingerprint of the abstract index used to detect rebuild need.
+
+    Encodes file count, total function count, and total semantic-region count.
+    Any of those changing means the LanceDB is stale and must be rebuilt.
+    """
+    file_count = len(abstract_index.files)
+    func_count = sum(len(fe.functions) for fe in abstract_index.files.values())
+    region_count = sum(len(fe.semantic_regions) for fe in abstract_index.files.values())
+    return f"{file_count}:{func_count}:{region_count}"
 
 if TYPE_CHECKING:
     from abstract_engine.index import AbstractIndex
@@ -705,6 +719,63 @@ class SemanticIndex:
     # Public sync API
     # ------------------------------------------------------------------
 
+    def try_load_from_disk(self, abstract_index: AbstractIndex) -> bool:
+        """Restore from an existing LanceDB if its fingerprint matches the current index.
+
+        Returns True and transitions to ``ready`` if a valid, non-empty table
+        exists whose fingerprint matches ``abstract_index``.  Returns False if
+        the index is missing, stale, or empty — caller should schedule a full
+        rebuild in that case.
+        """
+        meta_path = self._lancedb_path + ".meta.json"
+        if not os.path.exists(meta_path):
+            return False
+
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            return False
+
+        current_fp = _compute_index_fingerprint(abstract_index)
+        stored_fp = meta.get("fingerprint")
+        if stored_fp != current_fp:
+            log.info(
+                "SemanticIndex: fingerprint changed (stored=%s current=%s) — will rebuild",
+                stored_fp,
+                current_fp,
+            )
+            return False
+
+        if not self._ensure_ready():
+            return False
+
+        try:
+            count = self._table.count_rows()
+        except Exception:
+            return False
+
+        if count == 0:
+            return False
+
+        self._build_state = "ready"
+        self._ready_event.set()
+        log.info(
+            "SemanticIndex: restored from disk — %d records, fingerprint=%s",
+            count,
+            current_fp,
+        )
+        return True
+
+    def _save_meta(self, abstract_index: AbstractIndex) -> None:
+        """Persist build fingerprint so the next startup can skip a full rebuild."""
+        meta_path = self._lancedb_path + ".meta.json"
+        try:
+            with open(meta_path, "w") as f:
+                json.dump({"fingerprint": _compute_index_fingerprint(abstract_index)}, f)
+        except Exception:
+            log.warning("SemanticIndex: failed to persist build meta to %s", meta_path)
+
     def build_from_index(self, abstract_index: AbstractIndex) -> None:
         self._build_state = "building"
         self._last_error = None
@@ -761,6 +832,7 @@ class SemanticIndex:
                 log.warning("FTS index creation failed")
 
             self._build_state = "ready"
+            self._save_meta(abstract_index)
             log.info("SemanticIndex build complete — %d records.", len(all_records))
         finally:
             self._ready_event.set()

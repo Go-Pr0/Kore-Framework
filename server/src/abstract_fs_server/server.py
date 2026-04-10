@@ -259,6 +259,14 @@ def _eager_startup() -> None:
 
     _registry = RepoRegistry(base_config, embedder, reranker)
 
+    # Eagerly build bundles for any repos listed in PRELOAD_REPO_PATHS so that
+    # semantic embedding starts immediately rather than on the first tool call.
+    preload_env = os.environ.get("PRELOAD_REPO_PATHS", "").strip()
+    if preload_env:
+        preload_paths = [p.strip() for p in preload_env.split(",") if p.strip()]
+        logger.info("Preloading %d repo(s): %s", len(preload_paths), preload_paths)
+        _registry.preload_sync(preload_paths)
+
 
 def main() -> None:
     """Console-script entrypoint."""

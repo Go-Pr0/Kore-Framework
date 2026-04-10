@@ -24,7 +24,34 @@ model: sonnet
 
   <acceptance_criteria>
     <item>Code paths have been explicitly traced with clear reasoning.</item>
-    <item>A concise summary of findings is provided to the orchestrator: root cause, affected areas, severity, and recommended approach (which may be "simple fix" or "needs a deeper refactor").</item>
+    <item>Findings returned to the orchestrator are actionable enough that a worker can implement the fix WITHOUT re-tracing. Include: exact file path(s), function/line, the current (buggy) code snippet, why it's wrong, and the specific change required. A worker reading your output should not need to re-open the file to confirm your diagnosis.</item>
+    <item>Severity and scope: is this a one-line fix, a localized refactor, or does it need a deeper plan? State it plainly.</item>
     <item>Out-of-scope issues flagged to the orchestrator for triage.</item>
   </acceptance_criteria>
+
+  <output_format>
+    Return findings in this shape so the orchestrator can pass them verbatim to a worker:
+
+    ## Root cause
+    {One-paragraph explanation of what's actually wrong and why.}
+
+    ## Location
+    - File: `path/to/file.py`
+    - Function / symbol: `name`
+    - Lines: approximate range
+
+    ## Current (buggy) code
+    ```
+    {The exact snippet as it exists today.}
+    ```
+
+    ## Required change
+    {Specific, implementable instruction — what to replace it with or how to restructure. Detailed enough that a worker does not need to re-read the file to act.}
+
+    ## Severity & scope
+    {simple-fix | localized-refactor | needs-deeper-plan}
+
+    ## Other findings
+    {Related issues flagged for triage, or "none".}
+  </output_format>
 </bug_tracer_agent>
